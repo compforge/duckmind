@@ -234,6 +234,8 @@ fn permits(call: &proto::Call) -> bool {
         // not exist for the first ~73s of a boot is not a control transport. The body pose and
         // the mouth ride with it: all of these are a stream of small updates, and the argument is
         // about the stream, not about any one of them.
+        // First deployment uses a local fake/sim policy runner, not remote joint ownership.
+        RobotActionsBegin | RobotActionsSubmit(_) | RobotActionsEnd(_) => false,
         RobotMove(_) | RobotHead(_) | RobotLook(_) | RobotPose(_) | RobotMouth(_) => false,
 
         // **Not teleop either, and it sat in that group for the same reason a skill did**: it was

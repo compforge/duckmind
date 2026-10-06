@@ -60,6 +60,8 @@ fn permits(call: &proto::Call) -> bool {
         // budget and a link that does not exist for the first ~73s of a boot is not a control
         // transport". A datachannel is a control transport, so this is the transport those
         // refusals were pointing at.
+        // First deployment uses a local fake/sim policy runner, not remote joint ownership.
+        RobotActionsBegin | RobotActionsSubmit(_) | RobotActionsEnd(_) => false,
         RobotMove(_) | RobotHead(_) | RobotLook(_) | RobotPose(_) | RobotMouth(_) => true,
         // The theremin rides with the sounds: it is one, and a browser that can quack a duck
         // may pick its instrument up too.

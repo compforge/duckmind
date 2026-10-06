@@ -40,6 +40,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use duck_ipc_proto as proto;
 use robotd_params::Slot;
 
+mod actions;
 mod camera;
 mod cells;
 mod configure;
@@ -461,6 +462,11 @@ enum SystemCommand {
 
 #[derive(Subcommand, Debug)]
 enum RobotCommand {
+    /// Execute model action chunks on a fake or simulated body.
+    Actions {
+        #[command(subcommand)]
+        command: actions::Command,
+    },
     /// Power the joints and ramp to the home pose, over about two seconds.
     ///
     /// **This moves every joint.** Have the robot on its stand, or hold it. Needs no policy — a
@@ -3153,7 +3159,12 @@ fn run_robot(socket: &Path, command: RobotCommand) -> Result<(), Failure> {
     let mut client = Client::connect_to("robotd", socket)?;
     client.hello()?;
 
+    if let RobotCommand::Actions { command } = &command {
+        return actions::run(&mut client, command);
+    }
+
     let (call, json) = match &command {
+        RobotCommand::Actions { .. } => unreachable!("handled above"),
         RobotCommand::Init { json } => (proto::Call::RobotInit, *json),
         RobotCommand::Relax { json, .. } => (proto::Call::RobotRelax, *json),
         RobotCommand::Enable { off, toggle, json } => (
@@ -3232,6 +3243,7 @@ fn run_robot(socket: &Path, command: RobotCommand) -> Result<(), Failure> {
         return Err(Failure::new(exit::REFUSED, reason));
     }
     match command {
+        RobotCommand::Actions { .. } => unreachable!("handled above"),
         RobotCommand::Init { .. } => println!("standing up — about two seconds to the home pose"),
         RobotCommand::Relax { .. } => println!("torque off"),
         // The daemon's own `reason` names the state it ended in, which is the only trustworthy

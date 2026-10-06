@@ -780,7 +780,7 @@ impl Server {
             | Call::RobotHealth
             | Call::RobotModelApi
             | Call::RobotRemoteSessionActive
-            | Call::RobotMove(_)
+            | Call::RobotActionsBegin | Call::RobotActionsSubmit(_) | Call::RobotActionsEnd(_) | Call::RobotMove(_)
             | Call::RobotHead(_)
             | Call::RobotLook(_)
             | Call::RobotStop
