@@ -29,6 +29,9 @@
 //! including the ones on the recovery path, so nothing here may pull in http, tar, crypto
 //! or an async runtime.
 
+mod actions;
+pub use actions::*;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -423,7 +426,8 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// an `updaterd` that has not run its first check yet — every board for the minute after it
 /// starts, including the one right after the update that brought v35 in. Both warned. The attempt
 /// tells them apart, and its error is what the warning was pointing at the journal for.
-pub const API_VERSION: u32 = 37;
+// v38: robot.actions.* and robot.state.actions; fake/sim only.
+pub const API_VERSION: u32 = 38;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -540,6 +544,9 @@ pub const JOINT_NAMES: [&str; 15] = [
 /// Method names, as they go on the wire. Namespaced so a new namespace cannot collide
 /// with `update.*`. [`Call`] is the typed form.
 pub mod method {
+    pub const ROBOT_ACTIONS_BEGIN: &str = "robot.actions.begin";
+    pub const ROBOT_ACTIONS_SUBMIT: &str = "robot.actions.submit";
+    pub const ROBOT_ACTIONS_END: &str = "robot.actions.end";
     pub const HELLO: &str = "hello";
 
     /// One raw camera frame. `mediad` answers the JSON-RPC header, followed immediately by the
@@ -985,6 +992,11 @@ pub enum Call {
     RobotModelApi,
     RobotRemoteSessionActive,
 
+    /// Acquire timed joint execution. Action calls require request IDs for admission feedback.
+    RobotActionsBegin,
+    RobotActionsSubmit(ActionChunkParams),
+    RobotActionsEnd(ActionEndParams),
+
     // ── intents ──────────────────────────────────────────────────────────────
     /// Continuous. Send as a notification.
     RobotMove(MoveParams),
@@ -1174,6 +1186,9 @@ impl Call {
             Call::RobotHealth => method::ROBOT_HEALTH,
             Call::RobotModelApi => method::ROBOT_MODEL_API,
             Call::RobotRemoteSessionActive => method::ROBOT_SESSION_ACTIVE,
+            Call::RobotActionsBegin => method::ROBOT_ACTIONS_BEGIN,
+            Call::RobotActionsSubmit(_) => method::ROBOT_ACTIONS_SUBMIT,
+            Call::RobotActionsEnd(_) => method::ROBOT_ACTIONS_END,
             Call::RobotMove(_) => method::ROBOT_MOVE,
             Call::RobotHead(_) => method::ROBOT_HEAD,
             Call::RobotLook(_) => method::ROBOT_LOOK,
@@ -1355,6 +1370,10 @@ impl Call {
             | Call::RobotPolicies
             | Call::RobotModel
             | Call::RobotMode => (Robot, Prompt),
+            // Action requests wait for bounded loop admission, not for motion completion.
+            Call::RobotActionsBegin | Call::RobotActionsSubmit(_) | Call::RobotActionsEnd(_) => {
+                (Robot, Prompt)
+            }
             // Intents and one-shot skills. All fast: they store a value the control loop reads on
             // its next tick, and none of them waits for the robot to finish anything.
             Call::RobotMove(_)
@@ -1469,6 +1488,9 @@ impl Call {
             Call::Pin(p) => encode(p),
             Call::Log(p) => encode(p),
             Call::Show(p) => encode(p),
+            Call::RobotActionsBegin => Value::Object(serde_json::Map::new()),
+            Call::RobotActionsSubmit(p) => encode(p),
+            Call::RobotActionsEnd(p) => encode(p),
             Call::RobotMove(p) => encode(p),
             Call::RobotHead(p) => encode(p),
             Call::RobotLook(p) => encode(p),
@@ -1563,6 +1585,9 @@ impl Call {
             method::ROBOT_HEALTH => Call::RobotHealth,
             method::ROBOT_MODEL_API => Call::RobotModelApi,
             method::ROBOT_SESSION_ACTIVE => Call::RobotRemoteSessionActive,
+            method::ROBOT_ACTIONS_BEGIN => Call::RobotActionsBegin,
+            method::ROBOT_ACTIONS_SUBMIT => Call::RobotActionsSubmit(decode(params)?),
+            method::ROBOT_ACTIONS_END => Call::RobotActionsEnd(decode(params)?),
             method::ROBOT_MOVE => Call::RobotMove(decode(params)?),
             method::ROBOT_HEAD => Call::RobotHead(decode(params)?),
             method::ROBOT_LOOK => Call::RobotLook(decode(params)?),
@@ -1699,6 +1724,18 @@ pub mod test_support {
             Call::RobotHealth,
             Call::RobotModelApi,
             Call::RobotRemoteSessionActive,
+            Call::RobotActionsBegin,
+            Call::RobotActionsSubmit(ActionChunkParams {
+                session_id: "sample".into(),
+                sequence: 1,
+                observation_t_ns: 0,
+                start_t_ns: 0,
+                step_ns: ACTION_STEP_NS,
+                positions: vec![[0.0; 15]],
+            }),
+            Call::RobotActionsEnd(ActionEndParams {
+                session_id: "sample".into(),
+            }),
             Call::RobotMove(MoveParams {
                 vx: 0.2,
                 vy: -0.1,
@@ -3706,6 +3743,9 @@ impl IntentResult {
 /// `requested` rather than the stream carrying only outcomes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RobotState {
+    /// External action execution, independent of whether the task has succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<ActionStatus>,
     /// Seconds since the daemon started. Monotonic: it is for correlating samples, not for
     /// telling the time.
     pub t: f64,
@@ -5560,7 +5600,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            67,
+            70,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }
@@ -6262,6 +6302,7 @@ mod tests {
     /// — so an additive field is one line here rather than one line per test.
     fn a_state() -> RobotState {
         RobotState {
+            actions: None,
             t: 1.5,
             movement: MoveState {
                 requested: [0.0; 3],

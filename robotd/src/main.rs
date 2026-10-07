@@ -18,6 +18,7 @@
 //! publishes and never calls into the loop — a wedged loop reports itself unhealthy rather
 //! than hanging the caller.
 
+mod action_chunk;
 mod chorale;
 mod control;
 mod intents;
@@ -523,6 +524,7 @@ fn drop_unloadable_overrides_with(
 }
 
 struct RobotState {
+    actions: action_chunk::Bridge,
     /// Epoch for every timestamp below. `Instant` so the clock cannot go backwards.
     started: Instant,
     ticks: AtomicU64,
@@ -688,6 +690,7 @@ impl RobotState {
         force_busy: bool,
     ) -> Self {
         Self {
+            actions: action_chunk::Bridge::new(),
             started: Instant::now(),
             ticks: AtomicU64::new(0),
             missed: AtomicU64::new(0),
@@ -985,6 +988,11 @@ async fn main() -> ExitCode {
         args.unhealthy,
         args.busy,
     ));
+
+    state.actions.available.store(
+        (args.fake || args.sim.is_some()) && state.period_us == 20_000,
+        Ordering::Release,
+    );
 
     if args.unhealthy {
         tracing::warn!("--unhealthy: will report unhealthy, so updates will roll back");
@@ -1831,6 +1839,7 @@ async fn control_loop<T: RobotIo>(
         "control loop running"
     );
 
+    let mut actions = state.actions.executor();
     let mut ticker = tokio::time::interval(period);
     // `Skip`, not `Burst` and not `Delay`.
     //
@@ -2890,7 +2899,42 @@ async fn control_loop<T: RobotIo>(
         // And only once the ramp is done, or the policy's first step would come from wherever the
         // robot was slumped. A fall does not stop the driving, as the prototype does not
         // stop it: the policy keeps going and the humans stay in charge.
-        let driving = snapshot.enabled
+        // The motor loop is the only owner of both chunk admission and target selection.
+        let action_tick = actions.tick(
+            &state.actions,
+            proto::clock::monotonic_ns(),
+            state.actions.available.load(Ordering::Acquire)
+                && fresh.is_some()
+                && bringup == Bringup::Ready
+                && imu_warm
+                && !in_limp_fall
+                && !powered_off
+                && shutdown_sit.is_none()
+                && mode_change.is_none()
+                && pending_swap.is_none(),
+            coast.known_positions(hold),
+        );
+        if action_tick.began {
+            intents.set_enabled(false);
+            intents.stop();
+            if let Some(controller) = controller.as_mut() {
+                controller.reset();
+            }
+            if let Some(instrument) = theremin.as_mut() {
+                instrument.set_active(false);
+            }
+            if let Some(ensemble) = chorale.as_mut() {
+                ensemble.set_active(false, tick_start, None);
+            }
+            let _ = intents.take_theremin_request();
+            let _ = intents.take_chorale_request();
+            was_driving = false;
+        }
+        if action_tick.began || action_tick.ended {
+            // Capture once; continuously following measurements would sag under gravity.
+            hold = coast.known_positions(hold);
+        }
+        let driving = !action_tick.owned && !action_tick.ended && !action_tick.began && snapshot.enabled
             && bringup == Bringup::Ready
             && controller.is_some()
             // The limp-fall sequence owns the robot for its duration: the whole point is
@@ -2983,6 +3027,12 @@ async fn control_loop<T: RobotIo>(
                 ),
                 LimpFall::Idle => unreachable!("in_limp_fall excludes Idle"),
             },
+            _ if action_tick.owned => (
+                action_tick.target.unwrap_or(hold),
+                policy_cfg.gain,
+                true,
+                "action_chunk".into(),
+            ),
             (true, Some(sensors)) => {
                 let controller = controller.as_mut().expect("driving implies a controller");
                 match controller.step(sensors, &command, snapshot.pose.active, dt, scale_mult) {
@@ -3017,7 +3067,9 @@ async fn control_loop<T: RobotIo>(
         // mouth opening. Before the mouth is written, because while an instrument is up it
         // *is* what the mouth is doing — the intent from a client is not competing with it.
         let mut theremin_state = None;
-        if let Some(instrument) = theremin.as_mut() {
+        if !action_tick.owned
+            && let Some(instrument) = theremin.as_mut()
+        {
             // Whether an instrument could be picked up right now, for the IPC side to
             // refuse on. Republished every tick because the sensor can go away under a
             // running daemon.
@@ -3082,7 +3134,9 @@ async fn control_loop<T: RobotIo>(
         // The chorale: where in the piece the ensemble is, and this duck's line of it. Before the
         // mouth, like the theremin, because while a duck is singing its beak is doing that.
         let mut chorale_state = None;
-        if let Some(ensemble) = chorale.as_mut() {
+        if !action_tick.owned
+            && let Some(ensemble) = chorale.as_mut()
+        {
             if let Some((active, piece_pin)) = intents.take_chorale_request() {
                 ensemble.set_active(active, tick_start, piece_pin);
             }
@@ -3195,8 +3249,17 @@ async fn control_loop<T: RobotIo>(
         }
 
         match safety.apply(targets, hold, gain) {
-            Ok(applied) => limits.extend(applied.limits),
-            Err(e) => tracing::warn!(error = %e, "bus write failed"),
+            Ok(applied) => {
+                limits.extend(applied.limits);
+                actions.written(&state.actions, true);
+            }
+            Err(e) => {
+                actions.written(&state.actions, false);
+                if action_tick.owned {
+                    hold = coast.known_positions(hold);
+                }
+                tracing::warn!(error = %e, "bus write failed");
+            }
         }
 
         // Only assemble a frame when somebody is subscribed. On a robot nobody usually is,
@@ -3206,6 +3269,11 @@ async fn control_loop<T: RobotIo>(
             && let Some(sensors) = sensors.as_ref()
         {
             let _ = state.state_tx.send(proto::RobotState {
+                actions: state
+                    .actions
+                    .available
+                    .load(Ordering::Acquire)
+                    .then(|| (*state.actions.status.load_full()).clone()),
                 t: state.started.elapsed().as_secs_f64(),
                 movement: proto::MoveState {
                     requested: snapshot.command.twist,
@@ -3733,6 +3801,14 @@ async fn handle(
         }
 
         let response = match call {
+            Ok(
+                call @ (proto::Call::RobotActionsBegin
+                | proto::Call::RobotActionsSubmit(_)
+                | proto::Call::RobotActionsEnd(_)),
+            ) => match state.actions.request(call).await {
+                Ok(value) => proto::Response::ok(Some(id), &value),
+                Err(error) => proto::Response::err(Some(id), error),
+            },
             Ok(call) => dispatch(&state, &intents, id, &call),
             Err(e) => proto::Response::err(Some(id), e),
         };
@@ -3748,6 +3824,9 @@ async fn handle(
 /// client that sends `robot.move` with an `id` is not silently ignored — the spec permits
 /// either, and refusing one because of a framing choice would be a surprise.
 fn apply_intent(state: &RobotState, intents: &Intents, call: &proto::Call) -> bool {
+    if state.actions.check_call(call).is_err() {
+        return false;
+    }
     match call {
         proto::Call::RobotMove(p) => {
             intents.set_twist([p.vx, p.vy, p.vyaw]);
@@ -4301,6 +4380,9 @@ fn dispatch(
     id: proto::Id,
     call: &proto::Call,
 ) -> proto::Response {
+    if let Err(error) = state.actions.check_call(call) {
+        return proto::Response::err(Some(id), error);
+    }
     match call {
         proto::Call::RobotMove(_)
         | proto::Call::RobotHead(_)

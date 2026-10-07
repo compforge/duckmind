@@ -4,6 +4,8 @@
 
 <h1 align="center">Microduck</h1>
 
+Duckmind adds [native Action Chunk execution](docs/design/action-chunks.md) to this Microduck runtime, currently available on fake and MuJoCo bodies.
+
 <p align="center">
   <em>A tiny biped robot that moves using reinforcement learning policies.</em>
 </p>
