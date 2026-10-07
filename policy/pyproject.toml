@@ -1,0 +1,29 @@
+[project]
+name = "duckmind-policy"
+version = "0.1.0"
+description = "Replaceable action-chunk policies for Duckmind"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "httpx>=0.28,<1", "pydantic>=2.10,<3", "uvicorn>=0.34,<1"]
+
+[project.scripts]
+duckmind-policy = "duckmind_policy.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1", "mypy>=1.15,<2"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

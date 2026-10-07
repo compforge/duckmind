@@ -18,7 +18,8 @@ Text + body state/history → learned policy → action chunk → robotd → rob
 
 Start with a language-conditioned motion policy, then add visual observations to explore
 vision-language-action (VLA) models. The model learns the motion; `robotd` owns timed execution
-and feedback. Training and model integration are ongoing work.
+and feedback. A [replaceable Policy interface and Fake backend](policy/README.md) exercise this
+execution path before training a model. Training and learned model integration are ongoing work.
 
 ## Origin
 
