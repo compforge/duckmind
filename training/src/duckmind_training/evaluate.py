@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from duckmind_training.contract import FPS, STATE_NAMES, TASKS, episode_success
+from duckmind_training.correction_quality import recovery_outcome
 from duckmind_training.learned import SmolPolicy
 from duckmind_training.simulation import Simulation
 
@@ -95,7 +96,8 @@ def evaluate(
                         text = task.texts[0] if language_split == "trained" else task.texts[-1]
                         # The teacher only prepares the initial state; recorded steps use VLA.
                         simulation.prepare(task, seed)
-                        stable = bool(simulation.metrics()["stable"])
+                        trace = [simulation.metrics()]
+                        stable = bool(trace[0]["stable"])
                         predictions = []
                         torch.manual_seed(seed)
                         for tick in range(round(manifest["seconds"] * FPS)):
@@ -107,7 +109,8 @@ def evaluate(
                                 stable = False
                                 break
                             simulation.apply(action)
-                            stable = stable and bool(simulation.metrics()["stable"])
+                            trace.append(simulation.metrics())
+                            stable = stable and bool(trace[-1]["stable"])
                             if not stable:
                                 break
                         metrics = simulation.metrics()
@@ -122,7 +125,14 @@ def evaluate(
                                 "success": episode_success(task, metrics, stable),
                             }
                         )
+                        # Retain the trajectory so a brief or diagonal movement cannot
+                        # masquerade as sustained forward walking. Reuse collection gates.
+                        if task.name == "forward":
+                            trials[-1]["forward_quality"] = recovery_outcome(
+                                trace, round(manifest["seconds"] * FPS)
+                            )
                         logging.info("physics trial=%s", trials[-1])
+                        trials[-1]["trace"] = trace
                         # Preserve completed trials if a later trial fails or is interrupted.
                         report["physics"] = {"status": "running", "trials": trials}
                         output.parent.mkdir(parents=True, exist_ok=True)
