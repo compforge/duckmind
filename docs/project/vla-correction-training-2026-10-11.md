@@ -102,4 +102,130 @@ Independent script review found no blocking issue. The zero-control state/action
 the native warm-start path. Image statistics differ because native training sets ImageNet stats;
 current VISUAL=IDENTITY means they do not change model inputs. No pure data-causality claim is made.
 
-Results will be recorded after the bounded pipeline finishes. A queued run is not a passing result.
+## Checkpoint save failure and bounded recovery
+
+Both arms executed all 2,000 updates, but mixed failed while saving its final checkpoint:
+`SafetensorError: I/O error: No space left on device (os error 28)`. `run-v5.exit-code` is 1.
+The failed `002000/pretrained_model` contains config only, not model weights. The /data00
+filesystem had only 389 MiB available. All logs and the failed directory are retained.
+
+Both arms have valid `001500` checkpoints, confirmed by successful-save log entries, 500 readable
+model tensors and native `training_step.json`. The final comparison therefore uses **1,500-step
+checkpoints from the original 2,000-step schedules**, selected before viewing any v5 physical
+outcome. It is not a new 1,500-step training run. The full 4,040-update budget was consumed; no
+updates are repeated or added. Control002000 remains available but is not the matched comparator.
+
+One byte-identical v4/mixed-zero model copy was replaced atomically with a verified same-filesystem
+hardlink, recovering about 1.2 GB without losing model content. No datasets, unique checkpoints or
+other projects were deleted. Recovery details and hashes are in `artifacts/audit-v5-recovery.json`.
+
+`artifacts/run-v5-evaluation.sh` resumes **evaluation only** with its own stage/log/exit files,
+preserving the original failed run. Four checkpoints, the same six fresh seeds and two language
+conditions remain fixed. Reports use `evaluation-v5-1500-{arm}-{language}.json`, with explicit
+001500 paths for both trained arms. Independent review verified that actual saved train configs
+differ only in dataset root and output directory, and all 70 non-image normalization statistics
+per processor match within baseline/control and mixed-zero/mixed pairs. These exact comparisons
+are saved in `artifacts/audit-v5-processors.json`.
+
+Before another training run, reserve space for all checkpoint weights and optimizer states;
+checking only GPU memory is insufficient.
+
+## Final paired physical results
+
+Evaluation-only continuation completed with exit0. All 48 planned trials are present: six physical
+seeds times two wordings times four checkpoints. An independent reviewer recomputed every gate
+from the stored traces using separate formulas and verified identical initial metrics within each
+seed. The task texts are “向前走” and “往前迈步”. No teacher takeover occurred.
+
+| Model | Strict success | Legacy success | Complete and stable for 4 s |
+|---|---:|---:|---:|
+| v4 baseline | 0/12 | 0/12 | 0/12 |
+| Same weights, mixed normalization | 0/12 | 0/12 | 0/12 |
+| Original data, checkpoint1500 | 0/12 | 0/12 | 0/12 |
+| Added corrections, checkpoint1500 | 0/12 | 1/12 | 1/12 |
+
+The mixed model changes behavior, but has **not improved strict forward-task success** in this
+small paired test. With familiar wording its median forward displacement at termination is
+0.268 m versus control 0.048 m. However, its median executed duration is only 1.47 s versus
+control 1.62 s; larger displacement before instability is not stable locomotion. With the reserved
+wording the median durations are 1.41 s and 2.18 s respectively. These durations include the first
+unstable tick for terminated trials; they are not survival estimates beyond the four-second cap.
+
+Forty-seven trials terminate at the first projected-gravity tilt violation (`gravity_z >= -0.65`),
+before trunk height breaches the height gate. Report these as **instability / excessive tilt**,
+not proof that the body had already hit the floor.
+
+The remaining trial is mixed / held-out / seed365: it completes200ticks, advances0.275m and stays
+within the balance gate, but maximum absolute yaw is0.970rad (about56 degrees), above the fixed
+0.5rad bound. Its final yaw is only−0.019rad. This is exactly why a final-pose-only or legacy5cm
+success check would overstate capability. The entire trace is preserved in
+`evaluation-v5-1500-mixed-held-out.json`.
+
+As a concrete paired failure, control / familiar / seed360 starts upright at height0.11655m,
+gravity_z−0.99989; after76 applied targets it is at height0.09594m, gravity_z−0.59355 and total
+forward displacement−0.01099m. Mixed at the same initial seed/text advances0.30062m but loses
+stability after91 targets. Neither is a successful walk.
+
+Offline eight-chunk action MSE is0.003412rad² for v4,0.003111 for mixed-zero,0.004165 for control
+and0.003211 for mixed. This narrow held-out sample repeats across the two physics-language reports;
+it is not16 independent samples per model and is not an all-task generalization score.
+Mixed-zero even has lower MSE than mixed while still failing every task, reinforcing that offline
+fit does not certify closed-loop success.
+
+Reported median inference is324–366ms, measured on offline held-out chunks, not each live rollout
+call. Replanning every five50Hz targets requires100ms, and the ten-target prediction covers200ms.
+All measured medians exceed both intervals. Since physics pauses for inference, this run provides
+no real-time deployment evidence.
+
+## Final ML-debug audit and interpretation
+
+`artifacts/audit-v5-results.json` holds per-language rows, every seed's applied steps, displacements,
+failed gates and source paths, plus training-curve summaries. The original log has5,357 lines after
+normalizing carriage returns. There are 404 logged optimizer observations:200 per formal arm and
+two per smoke. All logged loss and total gradient-norm values are finite.
+
+| Audit item | Observation and boundary |
+|---|---|
+| SHOULD merged size / split / alignment |125train episodes/25,000frames;375merged samples and45raw split samples passed; seed355 excluded |
+| SHOULD same starts and budgets |Both arms execute 2,000 updates from v4, plus20smoke each; saved configs differ only in dataset root/output directory; usable paired checkpoint is1500 |
+| SHOULD fresh unassisted physics |48/48 completed; trace gates independently recalculated; strict0/12 per arm |
+| Baseline and zero-update comparison |v4 and mixed-zero strict0/12; normalization alone changes behavior but does not solve walking |
+| Null / shortcut control |Stationary, excessive sideways drift and transient progress are rejected by existing unit-tested gates; no new random-policy/shuffled-label optimization run was performed |
+| Initialization / samples |Source labels/boundaries were audited; mixed-zero preserves exact v4 model hash; concrete paired physical sample above and first predicted target arrays remain in raw reports |
+| Loss and schedule |Formal control/mixed final logged losses0.062/0.051; final20logged-point means0.0407/0.0513. Both reach lr2.5e−6. Warmup/restart and different data/statistics prevent interpreting these as a causal model ranking |
+| Worst-looking finite points |Both peak formal loss at step320,lr9.4e−5:control0.139,mixed0.176. Peak total gradient norms1.789/1.902; native logger lacks per-module gradients, so no module-specific diagnosis follows |
+| Surprising log line |Normalized log5355 reports `No space left on device (os error 28)` during mixed final-save; explained by filesystem capacity, not loss divergence |
+| Timing / memory |Formal loops about 9 min each; native logger allocated memory about 2.33 GB, not a complete device-memory peak. Offline inference remains slower than100ms replanning |
+| Independent audit |Valid matched1500checkpoints and exact state/action processor stats; all 48 initial-state pairings and strict gate calculations checked; warned that apparent forward motion and terminal pose can hide instability/yaw |
+| Competing learning causes |Corrective coverage/weight insufficient, model/history or action representation limits, optimizer schedule, training/evaluation bugs and unknown factors remain candidates. Prior subjective planning weights are not a posterior inferred from this negative score |
+| Evidence against simple conclusions |More original updates also fail; normalization-only still fails; exact raw label and processor checks reduce some pipeline concerns. None rules out missing history or insufficient effective training |
+| What is still missing |Mixed002000model, multiple training seeds, task-weight-matched ordinary demonstrations, long-horizon and real-time evaluation, visual grounding and other-task regressions |
+
+Three misleading conclusions were checked: (1) a lower MSE can coexist with zero physical success;
+(2) the one legacy pass conceals a large transient yaw; (3) more forward displacement does not
+mean longer stable execution. Small correlated data, one optimizer seed and changed normalization /
+task weights additionally prevent isolating a pure corrective-state coverage effect.
+
+This tests one small corrective-data recipe, not the general viability of VLA or corrective
+imitation learning. A further investigation should first isolate forward-only imitation and
+observation/history sufficiency instead of blindly repeating the same mixed training budget.
+No further training was launched. All 4,040 authorized updates have been consumed.
+
+## Repeatability check and closure
+
+A separate no-training repeat evaluated mixed / held-out seeds360 and365. Both again fail the
+strict criterion. Seed360 executes61 rather than60 steps; seed365 executes185 rather than200,
+so the sole legacy success does **not** reproduce. These two repeated trials are excluded from
+the original 48-trial denominator. Evidence: `evaluation-v5-1500-mixed-repeat.json` and
+`audit-v5-repeat.json`.
+
+Independent review finds exactly matching initial trace metrics, but the first recorded numerical
+differences occur at tick11 and tick1 respectively, initially on the order of 1e−5 rad. Small
+differences amplified by closed-loop contact dynamics are a plausible mechanism, not an
+established source diagnosis. CUDA inference, image rendering and unrecorded internal state
+have not been isolated. Matching the recorded metrics does not establish identical complete
+MuJoCo/BAM state or pixel input. Same-seed bitwise trajectory reproducibility remains unresolved.
+
+No learning improvement or deployment readiness is established. The budget is exhausted,
+evaluation and result delivery are complete, and automatic follow-up is paused. A subsequent run
+needs a fresh scoped training decision, a disk-capacity budget and stronger repeatability evidence.
