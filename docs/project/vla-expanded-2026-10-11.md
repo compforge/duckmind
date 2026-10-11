@@ -101,20 +101,58 @@ of 54 at horizon 5, but remained unsuccessful. See `evaluation-v3-feedback1.json
 frequency alone is insufficient for this checkpoint; this experiment still paused physics while
 waiting for each prediction and does not establish feasible 50 Hz VLA inference.
 
-Round 2 is running as PID 3437215. It uses SmolVLA's native `chunk_size=10` rather than 50,
+Round 2 completed with exit code 0 (PID 3437215). It used SmolVLA's native `chunk_size=10` rather than 50,
 predicting 200 ms of targets to focus training on nearer actions. Dataset, body-state layout,
-model architecture and 20 ms target interval are unchanged. It warm-starts from v3 checkpoint
-`004980`, restarts the optimizer/scheduler, gates on 20 smoke updates and a 10×15 Policy.infer
-contract check, then performs 4,980 formal updates from v3 (not smoke weights). It repeats both
+model architecture and 20 ms target interval were unchanged. It warm-started from v3 checkpoint
+`004980`, restarted the optimizer/scheduler, passed 20 smoke updates and a 10×15 Policy.infer
+contract check, then performed 4,980 formal updates from v3 (not smoke weights). It repeated both
 language evaluations with the original seeds/horizons 5/10. The shorter prediction horizon plus
 additional updates is a directional experiment, not a strict single-variable ablation. MSE over
 10 future targets cannot be compared directly with MSE over 50.
 
-All two follow-up rounds are now allocated. After this round's evaluations, no further training
-is authorized by this experiment budget. Evidence uses the `run-v4.*`, `smolvla-v4*`,
-`evaluation-v4*.json` and `policy-contract-v4-smoke.json` artifact names. At this update the run
-is in preflight; no improvement from shorter chunks is claimed. Shorter chunks also provide less
-buffer against inference delay, so physical imitation success would still need real-time testing.
+Both follow-up rounds are complete and their training budget is exhausted. Evidence uses the
+`run-v4.*`, `smolvla-v4*`, `evaluation-v4*.json` and `policy-contract-v4-smoke.json` artifact names.
+No additional training or deployment follows automatically.
+
+## Final result: pipeline works, expert replacement does not
+
+| Checkpoint | Prediction length | Held-out wording (44 trials) | Familiar wording (11 trials) |
+|---|---|---|---|
+| v2, 2,000 updates | 50 targets | 8/44 | 5/11 |
+| v3, another 4,980 updates | 50 targets | 12/44 | 6/11 |
+| v4, another 4,980 updates | 10 targets | 14/44 | 7/11 |
+
+The 11 task scenarios represent 10 language intents because forward-stop and backward-stop
+share one instruction. These are small, repeatedly used development tests, not general skill
+success rates. Every trial lasts at most four simulated seconds, with no expert correction.
+
+For v4, stand and look-left/right passed all four held-out-wording trials each. Look-down passed
+only two of four; look-up, forward/backward walking, turning and both stopping scenarios passed
+none. Of 44 trials, 29 remained stable, often while failing to perform the requested motion.
+With familiar wording (one seed/horizon), standing, all four head directions and both stopping
+scenarios passed; forward/backward walking and both turns still lost balance. This establishes
+limited imitation, with both motor-control and paraphrase-generalization failures. No checkpoint
+is promoted as a drop-in replacement for the expert or the browser demo.
+
+Final v4 training loss was 0.034 and 10-step held-out action MSE 0.006250 rad². Median inference
+was 344 ms, longer than the entire 200 ms predicted trajectory and the tested 100/200 ms
+replanning intervals. This implementation has not demonstrated sustainable real-time control;
+all reported physical successes pause simulation during inference. Merely running the same
+inference asynchronously would not remove this measured throughput deficit. Visual grounding
+and real hardware remain untested, and no fresh final language/state holdout was used because
+the development results already failed the replacement goal.
+
+Keep all checkpoints and raw evidence for diagnosis. Candidate next work, requiring a new
+experiment budget, is successful corrective demonstrations near learner failures, broader
+training-only language coverage, and explicit observation/history and inference-timing audits.
+These are hypotheses to test; the current experiments did not isolate the cause of walking failure.
+
+Final model: `smolvla-v4/checkpoints/004980/pretrained_model/`. Its `model.safetensors` SHA-256 is
+`83f399f3f8ee957de369bbdbfe07308cc8fdb9e7b1e8886fa28d30ba7f749f5a`.
+`run-v4.outputs.sha256` also identifies its config and both final reports; `run-v4.inputs.sha256`
+identifies source/data inputs. The short-horizon implementation passed training formatting,
+lint and four tests, existing Policy validation, a CUDA smoke and the real Policy.infer schema
+check. The final results update is documentation only; no further code or model changes were made.
 
 On the devbox, paths below are relative to
 `~/rustprojects/compforge/duckmind/.worktrees/vla-training/training/artifacts/`:
