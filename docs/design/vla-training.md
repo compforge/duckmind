@@ -49,8 +49,9 @@ stopping therefore have distinct physical initial states, without an unobserved 
 Rejected rollouts never enter the behavioral-cloning dataset. These are baseline heuristics, not
 collision, energy or full gait-quality certification.
 
-The expert is used for initial settling before collection/evaluation. During a learned-policy
-rollout, it never corrects the model's actions. The simulator uses the same task adapter for expert
+The expert is used for initial settling before collection/evaluation. During autonomous learned-policy
+evaluation, it never corrects the model's actions. Corrective data collection below is explicitly
+a separate, expert-assisted process. The simulator uses the same task adapter for expert
 and learner so changing the controller does not silently change joint ordering or actuator physics.
 
 The Action Expert predicts normalized action chunks, then saved LeRobot postprocessors decode
@@ -86,3 +87,30 @@ training chunks use native SmolVLA configuration: they focus supervision on near
 reduce how much inference delay a runner can hide. This isolates feedback frequency under paused-physics
 inference; it cannot establish whether the GPU meets real-time deadlines. Data/input changes and
 additional training together are a new baseline, not a causal ablation of any single factor.
+
+## Corrective demonstrations
+
+The forward collector uses the current learner to visit states missing from successful expert
+rollouts. For each physical/random seed it runs an unassisted learner control, then replays selected
+prefixes and switches the same simulation instance to the expert. Deterministic replay avoids an
+incomplete state transplant: joint positions/velocities alone do not capture actuator dynamics or
+MuJoCo integration state. Replay checks the integration-state vector and applied BAM target.
+There is no reset or settling after the selected prefix. The expert's normalized previous action
+is reconstructed from the last applied absolute target; measured angles would be the wrong history.
+
+Each expert correction window is one independent Episode, following the corrections-only boundary
+of LeRobot's native DAgger strategy. That strategy's interactive teleoperator/real-time engine does
+not supply this automated ONNX/MuJoCo takeover, so the body-specific collector owns switching and
+physical acceptance while native LeRobotDataset owns conversion. This is DAgger-inspired collection,
+not a complete iterative DAgger learner or a claim of its theoretical guarantees.
+
+Quality metrics subtract the handover position but retain the original task heading; redefining
+heading at takeover would reward recovery in the wrong direction. The final second must continue
+forward with an upright body, rather than merely travel briefly then stand still. All prefixes of
+a seed stay in one split, including failed attempts. Accepted expert windows can later be mixed
+with the original demonstrations using an explicit dataset/version and weighting experiment;
+this collector does not modify an existing dataset or launch training automatically.
+
+Expert-assisted success validates the corrective labels, not the student's ability to recover.
+Reports therefore preserve both unassisted controls and expert corrections, rejected traces,
+checkpoint/teacher identities and inference timing. Physics still pauses for student inference.

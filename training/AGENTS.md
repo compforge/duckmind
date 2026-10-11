@@ -11,6 +11,8 @@ src/duckmind_training/
   contract.py     # 状态/动作语义、任务采集参数、成功判据和 Episode 划分
   simulation.py   # 复用上游 MuJoCo + BAM + ONNX 专家，提供离线采集和评估身体
   collect.py      # 动作前观测、专家目标和物理结果的原始证据
+  corrections.py  # 学生前缀重放、专家接管、配对对照与纠偏窗口采集
+  correction_quality.py # 原任务方向上的纠偏成功判据
   dataset.py      # 原生 LeRobotDataset 转换，分别保存训练/评估数据
   initialization.py # 扩展预训练状态投影，保留其它权重
   train.py        # 调用 LeRobot 原生训练器

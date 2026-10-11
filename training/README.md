@@ -55,6 +55,42 @@ Outputs are raw compressed trajectories plus provenance/outcome metadata, then i
 `train/` and `eval/` LeRobot datasets with Parquet state/actions and MP4 video. No data is uploaded.
 The [data design](../docs/design/vla-training.md) explains units and model inputs.
 
+## Collect corrections from learner states
+
+Use a fixed learner checkpoint to discover forward-walking states, then let the expert continue
+from selected learner prefixes. This does not update model weights or change the online Runner.
+
+```bash
+uv run --locked --extra train python -m duckmind_training.corrections \
+  --upstream /path/to/microduck_rl --teacher /path/to/velstand.onnx \
+  --checkpoint artifacts/smolvla-v4/checkpoints/004980/pretrained_model \
+  --output artifacts/corrections-forward --seeds 350 351 352 353 354 355 \
+  --prefix-steps 10 25 50 --seconds 4 --execute-steps 5
+uv run --locked --extra train duckmind-dataset \
+  --raw artifacts/corrections-forward --output artifacts/dataset-corrections-forward
+```
+
+The collector first checks expert handover continuity. It then saves an expert-only control and
+a student-only rollout for each seed, replays exact student targets to each selected prefix, and
+checks the full MuJoCo integration state and actuator target against the original prefix.
+At handover it preserves physics/BAM and reconstructs the expert's previous-action input.
+Only the following expert window is an eligible training episode; action chunks never span the
+student/expert boundary. Prefix lengths are scheduled probes of learner-visited states, not a
+learned risk detector. A prefix already fallen or never reached is explicitly rejected.
+
+Every attempt stays in `manifest.json`; attempted expert windows have `.npz` arrays and `.json`
+physical traces, including rejected windows. Student prefixes and teacher-only controls live in
+`evidence/`. Conversion selects only accepted expert windows. Related prefixes share their
+seed's train/eval split; reserved labels are applied only to the corresponding eval episodes.
+The student's discovery prompt is always the familiar “向前走”. These eval episodes test
+corrective-label prediction, not autonomous learned recovery or fresh language generalization.
+
+Acceptance requires four seconds (or the configured duration) without losing balance, forward
+progress relative to the handover position, bounded yaw relative to the original task heading,
+limited lateral drift, and an upright final second with continued forward progress. The expert-only
+control must pass the same gates. Failed attempts remain visible; a run lacking accepted data in
+either split fails conversion. Detailed boundaries are in the [data design](../docs/design/vla-training.md).
+
 ## Fine-tune and evaluate
 
 ```bash

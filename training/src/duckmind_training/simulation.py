@@ -155,6 +155,27 @@ class Simulation:
         self.expert.set_position_targets(np.delete(targets, JOINT_NAMES.index("mouth")))
         self.advance()
 
+    def resume_teacher(self, task: Task) -> None:
+        """Hand control back without changing physics, actuator state or the applied target.
+
+        The expert consumes its previous normalized action. During learner execution that
+        history is stale; reconstruct it from the target actually sent, not measured position.
+        This inverse is valid for the configured no-delay, command-observation expert only.
+        """
+        if self.expert.use_delay or not self.expert.new_cmd_obs:
+            raise ValueError("teacher handover requires no delay and command observations")
+        self.expert.last_action = (
+            (self.bam.q_target - self.expert.default_pose) / self.expert.action_scale
+        ).astype(np.float32)
+        self.command(task)
+
+    def integration_state(self) -> np.ndarray:
+        """Physics witness for deterministic prefix replay; not a complete BAM snapshot."""
+        spec = mujoco.mjtState.mjSTATE_INTEGRATION
+        state = np.empty(mujoco.mj_stateSize(self.model, spec))
+        mujoco.mj_getState(self.model, self.data, state, spec)
+        return state
+
     def metrics(self) -> dict[str, float | bool]:
         delta = self.data.qpos[self.root : self.root + 2] - self.origin
         c, s = np.cos(self.origin_yaw), np.sin(self.origin_yaw)
@@ -167,6 +188,7 @@ class Simulation:
             "yaw_rad": self.yaw_travel,
             "tail_speed_mps": float(np.mean(self.tail_speeds)) if self.tail_speeds else 0.0,
             "trunk_z_m": z,
+            "gravity_z": gravity_z,
             **{
                 name: float(relative[i + 5])
                 for i, name in enumerate(
