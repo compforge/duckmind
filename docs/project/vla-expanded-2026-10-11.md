@@ -69,26 +69,52 @@ four head directions), versus 2/11 for held-out wording under the same condition
 turning and both stopping cases failed even with familiar wording. Language generalization and
 motor imitation both need improvement; this single paired seed does not quantify their general rates.
 
-## Bounded follow-up: more updates on the same demonstrations
+## Completed follow-up: more updates on the same demonstrations
 
-Follow-up round 1 of the two-round budget is running as PID 2844949. It keeps the dataset and
-architecture fixed, warm-starts from v2 checkpoint `002000`, and restarts the native optimizer
-and scheduler. It first checks dataset metadata, runs a separate 20-step smoke and reloads it
-for inference, then trains 4,980 steps at batch 8 from the original v2 weights. Smoke weights do
-not flow into the formal run. This consumes 5,000 updates including preflight; one further round
-remains available after evaluating the results.
+Follow-up round 1 completed with exit code 0 (PID 2844949). It kept the dataset and architecture
+fixed, warm-started from v2 checkpoint `002000`, and restarted the native optimizer/scheduler.
+It checked dataset metadata, ran a separate 20-step smoke and reloaded it for inference, then
+trained 4,980 steps at batch 8 from the original v2 weights. Smoke weights did not flow into the
+formal run. This consumed 5,000 updates including preflight.
 
-The job then repeats the same 44 held-out-language physical trials and 11 familiar-language
-trials. These reused seeds are development diagnostics, not a fresh final test set. A later
+The job repeated the same 44 held-out-language physical trials and 11 familiar-language
+trials. Held-out success improved from 8/44 to 12/44: stand and both horizontal head directions
+passed at both seeds/horizons; all other tasks failed. Familiar wording improved from 5/11 to
+6/11 by additionally passing stop-from-forward. Walking, turning and stop-from-backward still
+failed. Final training loss was 0.040, held-out action MSE 0.01223 rad², and median inference
+329 ms. These reused seeds are development diagnostics, not a fresh final test set. A later
 replacement claim needs untouched wording/initial conditions and execution with real inference
 latency. There is no expert correction during learned rollouts.
 
 Evidence under `artifacts/`: `run-v3.sh`, `run-v3.pid`, `run-v3.stage`, `run-v3.log`,
 `run-v3.inputs.sha256`, `run-v3.exit-code` (on exit), `smolvla-v3-smoke/`,
 `evaluation-v3-smoke.json`, `smolvla-v3/`, `evaluation-v3.json`, and
-`evaluation-v3-trained-language.json`. At this update, the follow-up is in preflight; no new
-motion success is claimed. The evaluation CLI passed local formatting, lint and four tests,
+`evaluation-v3-trained-language.json`. The evaluation CLI passed local formatting, lint and four tests,
 and its new familiar-language option completed a real checkpoint/MuJoCo diagnostic.
+
+## Final bounded follow-up: shorter predicted chunks
+
+Before allocating the final round, a familiar-language diagnostic replanned every single control
+tick for the five remaining failed motion cases, using seed 10042. All five still failed:
+forward/backward, left/right turning and stop-from-backward. Forward survived 171 ticks instead
+of 54 at horizon 5, but remained unsuccessful. See `evaluation-v3-feedback1.json`. Feedback
+frequency alone is insufficient for this checkpoint; this experiment still paused physics while
+waiting for each prediction and does not establish feasible 50 Hz VLA inference.
+
+Round 2 is running as PID 3437215. It uses SmolVLA's native `chunk_size=10` rather than 50,
+predicting 200 ms of targets to focus training on nearer actions. Dataset, body-state layout,
+model architecture and 20 ms target interval are unchanged. It warm-starts from v3 checkpoint
+`004980`, restarts the optimizer/scheduler, gates on 20 smoke updates and a 10×15 Policy.infer
+contract check, then performs 4,980 formal updates from v3 (not smoke weights). It repeats both
+language evaluations with the original seeds/horizons 5/10. The shorter prediction horizon plus
+additional updates is a directional experiment, not a strict single-variable ablation. MSE over
+10 future targets cannot be compared directly with MSE over 50.
+
+All two follow-up rounds are now allocated. After this round's evaluations, no further training
+is authorized by this experiment budget. Evidence uses the `run-v4.*`, `smolvla-v4*`,
+`evaluation-v4*.json` and `policy-contract-v4-smoke.json` artifact names. At this update the run
+is in preflight; no improvement from shorter chunks is claimed. Shorter chunks also provide less
+buffer against inference delay, so physical imitation success would still need real-time testing.
 
 On the devbox, paths below are relative to
 `~/rustprojects/compforge/duckmind/.worktrees/vla-training/training/artifacts/`:

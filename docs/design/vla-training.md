@@ -19,7 +19,7 @@ The target is taken from BAM's position target, not `data.ctrl` (which contains 
 | `observation.state` | 36 floats: 15 measured absolute joint angles, 3 trunk angular velocities, 3 projected gravity components, then 15 joint velocities. Units rad, rad/s, and a unit gravity direction. |
 | `observation.images.head` | 256×256 RGB head-camera observation; upstream camera orientation correction with display rotation applied. |
 | `action` | 15 absolute joint position targets in radians, in the existing Policy/robotd joint order. |
-| Sample period | 20 ms (50 Hz); LeRobot forms future 50-step action chunks from these frames. |
+| Sample period | 20 ms (50 Hz); LeRobot forms future action chunks with the checkpoint's configured horizon (default 50 steps). |
 
 The 14-actuator alpha model has no physical mouth joint. Both measured mouth position and commanded
 mouth position are recorded as zero at robotd's mouth slot. This is an explicit simulation mapping,
@@ -81,6 +81,8 @@ No side-motion demonstration is accepted just because the policy received a nonz
 
 Physical evaluation takes explicit initial seeds and execution horizons. A horizon of 1, 2, 5 or
 10 means consuming that many predicted targets before obtaining another observation, independent
-of the model's 50-target prediction horizon. This isolates feedback frequency under paused-physics
+of the model's configured prediction horizon. Execution cannot exceed that horizon. Shorter
+training chunks use native SmolVLA configuration: they focus supervision on nearer targets but
+reduce how much inference delay a runner can hide. This isolates feedback frequency under paused-physics
 inference; it cannot establish whether the GPU meets real-time deadlines. Data/input changes and
 additional training together are a new baseline, not a causal ablation of any single factor.

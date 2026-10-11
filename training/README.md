@@ -86,6 +86,15 @@ To separate motor imitation failure from paraphrase generalization failure, repe
 checkpoint, seeds and execution horizons with `--language-split trained`. This uses the first
 training phrase for each physical task; the default `held-out` uses a reserved phrase. Raw-data
 action MSE always uses held-out episodes and language. Save the two reports to different paths.
+Use `--tasks forward backward` to restrict both prediction-error samples and physical trials
+to selected dataset tasks; the report records this subset.
+
+`duckmind-train --chunk-size 10` uses SmolVLA's native horizon setting to learn 200 ms of future
+targets instead of the default 50 targets (one second). The evaluator reads the horizon from
+the checkpoint and refuses execution windows longer than the prediction. Sampling remains at
+50 Hz. Shorter predictions reduce future motion to learn but also leave less time for an online
+runner to obtain its next chunk; success with paused physics does not resolve that latency tradeoff.
+Compare physical outcomes across horizons, not aggregate MSE over different future lengths.
 
 `SmolPolicy` implements `duckmind_policy.Policy.infer`; it requires joint velocities, head-camera images and IMU.
 The existing stock robotd Runner collects body states only, so this change does not by itself

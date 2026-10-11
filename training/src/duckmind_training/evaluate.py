@@ -24,22 +24,34 @@ def evaluate(
     seeds: list[int],
     max_held_out_chunks: int,
     language_split: str = "held-out",
+    task_names: list[str] | None = None,
 ) -> None:
-    if not seeds or not execute_steps or any(n < 1 or n > 50 for n in execute_steps):
-        raise ValueError("provide seeds and execution horizons within 1..50 steps")
+    if not seeds or not execute_steps or any(n < 1 for n in execute_steps):
+        raise ValueError("provide seeds and positive execution horizons")
     if language_split not in ("trained", "held-out"):
         raise ValueError("language_split must be trained or held-out")
     torch.manual_seed(42)
     model = SmolPolicy(checkpoint)
+    chunk_size = model.model.config.chunk_size
+    if any(n > chunk_size for n in execute_steps):
+        raise ValueError(f"execution horizon exceeds checkpoint chunk size {chunk_size}")
     manifest = json.loads((raw / "manifest.json").read_text())
+    families = manifest["task_families"] if task_names is None else task_names
+    if not families or not set(families).issubset(manifest["task_families"]):
+        raise ValueError("evaluation tasks must be present in the dataset manifest")
     if manifest["state_names"] != list(STATE_NAMES):
         raise ValueError("raw state layout differs from the model adapter")
-    held_out = [e for e in manifest["episodes"] if e["split"] == "eval" and e["accepted"]]
+    held_out = [
+        e
+        for e in manifest["episodes"]
+        if e["split"] == "eval" and e["accepted"] and e["task_family"] in families
+    ]
     errors, times = [], []
     sample = None
     for episode in held_out:
         with np.load(raw / f"{episode['id']}.npz") as frames:
-            starts = list(range(0, len(frames["state"]) - 49, 50))
+            # Keep sampling times independent of prediction length for horizon comparisons.
+            starts = list(range(0, len(frames["state"]) - chunk_size + 1, 50))
             per_episode = max(1, max_held_out_chunks // len(held_out))
             for start in starts[:per_episode]:
                 before = time.perf_counter()
@@ -59,12 +71,14 @@ def evaluate(
         raise ValueError("no complete held-out action chunks")
     report = {
         "checkpoint": str(checkpoint),
+        "chunk_size": chunk_size,
         "held_out_chunks": len(errors),
         "action_mse_rad2": float(np.mean(errors)),
         "inference_seconds_median": float(np.median(times)),
         "sample": sample,
         "physics": {"status": "not_run"},
         "physics_language_split": language_split,
+        "task_families": families,
     }
     if upstream is not None and teacher is not None:
         simulation = Simulation(upstream, teacher)
@@ -73,7 +87,7 @@ def evaluate(
             for horizon in execute_steps:
                 for seed in seeds:
                     for template in TASKS:
-                        if template.name not in manifest["task_families"]:
+                        if template.name not in families:
                             continue
                         task = template.sample(seed)
                         # Hold physical starts/noise fixed when comparing familiar wording
@@ -137,6 +151,7 @@ def main() -> None:
     parser.add_argument("--seeds", nargs="+", type=int, default=[10042])
     parser.add_argument("--max-held-out-chunks", type=int, default=40)
     parser.add_argument("--language-split", choices=("trained", "held-out"), default="held-out")
+    parser.add_argument("--tasks", nargs="+", choices=[t.name for t in TASKS])
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     evaluate(
@@ -149,4 +164,5 @@ def main() -> None:
         args.seeds,
         args.max_held_out_chunks,
         args.language_split,
+        args.tasks,
     )

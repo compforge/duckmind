@@ -20,6 +20,7 @@ def main() -> None:
     parser.add_argument("--model", default="lerobot/smolvla_base")
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--chunk-size", type=int, choices=range(1, 101), default=50)
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
@@ -47,8 +48,10 @@ def main() -> None:
     policy.load_vlm_weights = False  # The full checkpoint already supplies VLM weights.
     policy.train_expert_only = True
     policy.train_state_proj = True
-    policy.chunk_size = 50
-    policy.n_action_steps = 10
+    # Native LeRobot derives future action labels from this horizon. Shorter chunks
+    # test near-term imitation without changing the body's 50 Hz target contract.
+    policy.chunk_size = args.chunk_size
+    policy.n_action_steps = min(10, args.chunk_size)
     policy.use_amp = True
     policy.scheduler_warmup_steps = min(100, max(1, args.steps // 10))
     policy.scheduler_decay_steps = args.steps
