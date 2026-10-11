@@ -23,9 +23,12 @@ def evaluate(
     execute_steps: list[int],
     seeds: list[int],
     max_held_out_chunks: int,
+    language_split: str = "held-out",
 ) -> None:
     if not seeds or not execute_steps or any(n < 1 or n > 50 for n in execute_steps):
         raise ValueError("provide seeds and execution horizons within 1..50 steps")
+    if language_split not in ("trained", "held-out"):
+        raise ValueError("language_split must be trained or held-out")
     torch.manual_seed(42)
     model = SmolPolicy(checkpoint)
     manifest = json.loads((raw / "manifest.json").read_text())
@@ -61,6 +64,7 @@ def evaluate(
         "inference_seconds_median": float(np.median(times)),
         "sample": sample,
         "physics": {"status": "not_run"},
+        "physics_language_split": language_split,
     }
     if upstream is not None and teacher is not None:
         simulation = Simulation(upstream, teacher)
@@ -72,6 +76,9 @@ def evaluate(
                         if template.name not in manifest["task_families"]:
                             continue
                         task = template.sample(seed)
+                        # Hold physical starts/noise fixed when comparing familiar wording
+                        # with a reserved paraphrase; action MSE above stays held out.
+                        text = task.texts[0] if language_split == "trained" else task.texts[-1]
                         # The teacher only prepares the initial state; recorded steps use VLA.
                         simulation.prepare(task, seed)
                         stable = bool(simulation.metrics()["stable"])
@@ -80,7 +87,7 @@ def evaluate(
                         for tick in range(round(manifest["seconds"] * FPS)):
                             if tick % horizon == 0:
                                 state, image = simulation.observe()
-                                predictions = model.predict(task.texts[-1], state, image)
+                                predictions = model.predict(text, state, image)
                             action = predictions[tick % horizon]
                             if not np.isfinite(action).all() or np.any(np.abs(action) > np.pi):
                                 stable = False
@@ -93,7 +100,7 @@ def evaluate(
                         trials.append(
                             {
                                 "task_family": task.name,
-                                "task": task.texts[-1],
+                                "task": text,
                                 "seed": seed,
                                 "execute_steps": horizon,
                                 "ticks": tick + 1,
@@ -129,6 +136,7 @@ def main() -> None:
     parser.add_argument("--execute-steps", nargs="+", type=int, default=[10])
     parser.add_argument("--seeds", nargs="+", type=int, default=[10042])
     parser.add_argument("--max-held-out-chunks", type=int, default=40)
+    parser.add_argument("--language-split", choices=("trained", "held-out"), default="held-out")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     evaluate(
@@ -140,4 +148,5 @@ def main() -> None:
         args.execute_steps,
         args.seeds,
         args.max_held_out_chunks,
+        args.language_split,
     )

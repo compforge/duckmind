@@ -45,13 +45,50 @@ verified teacher walking. This is still a small flat-floor dataset, not broad do
 - Local/deployed Python source digest (sorted filenames plus bytes):
   `966fd99be5fbe0c1ebc80456ab1aa0dc68fc648ae3365bec980e9ccc061ac52e`.
 
-## Running experiment
+## Completed 2,000-step experiment
 
-At this record's update, full collection is complete and dataset conversion is running. The
-bounded job uses PID 2576163 and automatically gates each stage: collection, conversion,
-20-step smoke training, checkpoint inference, 2,000-step training (batch 8), then synchronous
-physical evaluation. Evaluation requests execution horizons 5/10 and seeds 10042/10043.
-The 2-step engineering preflight is separate; it does not establish physical task success.
+The job completed with exit code 0 after collection, conversion, 20-step smoke training,
+checkpoint inference, 2,000-step training (batch 8) and synchronous physical evaluation.
+The final training log reports loss 0.118. Held-out action MSE is 0.01325 rad² and median
+inference time is 353 ms. The task set differs from v1, so aggregate MSE is not a matched comparison.
+
+Only 8/44 physical trials passed: stand and look-right passed at both seeds (10042/10043)
+and both execution horizons (5/10 ticks). All other tasks failed. 33/44 trials remained stable,
+but often barely moved; stopping from walking could lose balance. Each horizon passed 4/22,
+so increasing feedback frequency alone did not solve this checkpoint's failures. These results
+do not establish replacement of the command-conditioned expert.
+
+The model saw 16,000 sampled frames during training, about 0.73 dataset-equivalent passes.
+Undertraining is a hypothesis to test, not an explanation established by the current loss.
+A paired physical evaluation with the first training phrase holds seed and horizon fixed to
+separate failure on familiar wording from held-out paraphrase failure. The evaluator records
+`physics_language_split`; held-out raw action MSE keeps its original meaning.
+
+This diagnostic completed at seed 10042/horizon 5: familiar wording passed 5/11 (stand and all
+four head directions), versus 2/11 for held-out wording under the same conditions. Walking,
+turning and both stopping cases failed even with familiar wording. Language generalization and
+motor imitation both need improvement; this single paired seed does not quantify their general rates.
+
+## Bounded follow-up: more updates on the same demonstrations
+
+Follow-up round 1 of the two-round budget is running as PID 2844949. It keeps the dataset and
+architecture fixed, warm-starts from v2 checkpoint `002000`, and restarts the native optimizer
+and scheduler. It first checks dataset metadata, runs a separate 20-step smoke and reloads it
+for inference, then trains 4,980 steps at batch 8 from the original v2 weights. Smoke weights do
+not flow into the formal run. This consumes 5,000 updates including preflight; one further round
+remains available after evaluating the results.
+
+The job then repeats the same 44 held-out-language physical trials and 11 familiar-language
+trials. These reused seeds are development diagnostics, not a fresh final test set. A later
+replacement claim needs untouched wording/initial conditions and execution with real inference
+latency. There is no expert correction during learned rollouts.
+
+Evidence under `artifacts/`: `run-v3.sh`, `run-v3.pid`, `run-v3.stage`, `run-v3.log`,
+`run-v3.inputs.sha256`, `run-v3.exit-code` (on exit), `smolvla-v3-smoke/`,
+`evaluation-v3-smoke.json`, `smolvla-v3/`, `evaluation-v3.json`, and
+`evaluation-v3-trained-language.json`. At this update, the follow-up is in preflight; no new
+motion success is claimed. The evaluation CLI passed local formatting, lint and four tests,
+and its new familiar-language option completed a real checkpoint/MuJoCo diagnostic.
 
 On the devbox, paths below are relative to
 `~/rustprojects/compforge/duckmind/.worktrees/vla-training/training/artifacts/`:
@@ -64,8 +101,9 @@ On the devbox, paths below are relative to
 | Existing Policy contract check | `policy-contract-v2.json`, `contract-v2.log` |
 | Job definition and live status | `run-v2.sh`, `run-v2.pid`, `run-v2.stage`, `run-v2.log` |
 | Final process result (written on exit) | `run-v2.exit-code` |
-| Full dataset (conversion in progress at this update) | `dataset-v2/{train,eval}` |
-| Scheduled model and evaluation outputs | `smolvla-v2/`, `evaluation-v2.json` |
+| Full dataset | `dataset-v2/{train,eval}` |
+| Model and completed physical evaluation | `smolvla-v2/`, `evaluation-v2.json` |
+| Paired familiar-language diagnostic | `evaluation-v2-trained-language.json` |
 
 A running stage or successful process exit is not a passing motion result. Consult the final
 physical trials before claiming improvement or replacement of the official policy. Physics pauses

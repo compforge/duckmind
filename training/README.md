@@ -82,6 +82,11 @@ physical task outcomes. Physics pauses while inference runs; this is a **delay-f
 evaluation**, not proof that real-time execution meets the robotd deadline. There is no claimed
 real-hardware validation. A low loss alone is not sufficient to replace the balancing controller.
 
+To separate motor imitation failure from paraphrase generalization failure, repeat the same
+checkpoint, seeds and execution horizons with `--language-split trained`. This uses the first
+training phrase for each physical task; the default `held-out` uses a reserved phrase. Raw-data
+action MSE always uses held-out episodes and language. Save the two reports to different paths.
+
 `SmolPolicy` implements `duckmind_policy.Policy.infer`; it requires joint velocities, head-camera images and IMU.
 The existing stock robotd Runner collects body states only, so this change does not by itself
 provide a camera-enabled online robotd loop. The adapter can be passed to the existing HTTP
