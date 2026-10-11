@@ -9,6 +9,7 @@ locomotion or a camera-enabled online robotd loop.
 The devbox is Linux amd64 with an NVIDIA L4 (24 GiB), Python 3.12.13 and PyTorch 2.7.1+cu126.
 CUDA allocation and tensor computation passed. The training source is synchronized from the
 Duckmind `worktree-vla-training` checkout; the devbox directory is a source snapshot.
+The executed training code is in commit `55323b3`; local and deployed source digests matched.
 
 - Runtime dependencies: `training/uv.lock`, SHA-256
   `13113b1b5b69e3a5881e31e1cc1e7f412ef53751e67560930f9aab0f03366b36`.
@@ -44,12 +45,30 @@ and Linux. The collection, data decoding and GPU training checks ran on Linux.
 | Median chunk inference time | 0.356 seconds on this smoke run |
 | Existing Policy interface | Real checkpoint returned a validated 50×15 Action Chunk at 20 ms per step |
 | Physical evaluation | 0/5 successful; stability checks failed after 40–60 ticks |
-| 1,000-step baseline, batch 8 | Started; training and post-training evaluation run as one bounded job |
+| 1,000-step baseline, batch 8 | Completed; step-1,000 checkpoint and post-training evaluation saved |
 
 The smoke model's loss is not physical success: the duck loses stability after roughly
 0.8–1.2 seconds. Physics is paused while inference runs, so these failures occur even without
 real-time inference delay. Inference time also exceeds the evaluation's 200 ms replanning
 interval; this experiment does not validate a real-time control deadline.
+
+The 1,000-step baseline finished with a logged loss of 0.125 and a recorded CUDA peak of
+2.59 GiB. Held-out action MSE was 0.006728 rad² over the same 40 chunks; median inference time
+was 0.339 seconds. Its physical outcomes were:
+
+| Instruction | Outcome in the 4-second trial |
+|---|---|
+| 稳稳地站着 | Passed stability/drift checks for all 200 ticks |
+| 看看左边 | Passed; final head yaw 0.212 rad against a 0.3 rad goal |
+| 看看右边 | Passed; final head yaw −0.253 rad against a −0.3 rad goal |
+| 往前迈步 | Failed stability at tick 50 (1.00 s) |
+| 往后退步 | Failed stability at tick 69 (1.38 s); displacement was forward |
+
+This is 3/5 successful trials at one held-out initial seed (10042), using the reserved task
+expressions and the documented heuristic thresholds. It is partial learned capability, not a
+robustness estimate. The two locomotion failures need investigation of observation coverage,
+demonstration coverage and closed-loop distribution shift before claiming replacement of the
+expert. More optimization steps alone are not established as the remedy.
 
 ## Artifacts and continuation
 
@@ -69,9 +88,8 @@ Paths below are relative to that directory:
 | Baseline log and output | `artifacts/train-v1.log`, `artifacts/smolvla-v1/` |
 | Baseline evaluation after training | `artifacts/evaluation-v1.json` |
 
-The PID was 2425400 when launched; check the process and completion code before assuming it
-is still running. `run-v1.exit-code` is written on exit; zero means both training and evaluation
-commands completed, not that the physical tasks succeeded. Read the evaluation's task results.
+The bounded job launched as PID 2425400 and finished with `run-v1.exit-code = 0`. Both training
+and evaluation commands completed; physical task success is the separate 3/5 result above.
 
 The normal collection/training commands and boundaries are in
 [training/README.md](../../training/README.md) and the [data design](../design/vla-training.md).
