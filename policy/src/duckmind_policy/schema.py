@@ -65,6 +65,9 @@ class Image(Contract):
 class Observation(Contract):
     t_ns: Timestamp
     positions: Vector15
+    # Last target actually applied before this sample, not a queued/predicted future target.
+    # Same order/units as positions; absent means the observation source cannot supply it.
+    previous_target: Target15 | None = None
     velocities: Vector15 | None = None
     imu: Imu | None = None
     images: Annotated[dict[str, Image], Field(max_length=4)] = Field(default_factory=dict)

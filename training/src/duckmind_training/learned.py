@@ -11,16 +11,22 @@ from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from PIL import Image
 
-from duckmind_training.contract import IMAGE_KEY, STATE_NAMES, state_vector
+from duckmind_training.contract import (
+    IMAGE_KEY,
+    PREVIOUS_TARGET_STATE_NAMES,
+    STATE_NAMES,
+    policy_state,
+    state_vector,
+)
 
 
 class SmolPolicy:
     def __init__(self, checkpoint: Path, device: str = "cuda"):
         self.model = SmolVLAPolicy.from_pretrained(str(checkpoint)).to(device).eval()
-        if tuple(self.model.config.input_features["observation.state"].shape) != (
-            len(STATE_NAMES),
-        ):
+        shape = tuple(self.model.config.input_features["observation.state"].shape)
+        if shape not in ((len(STATE_NAMES),), (len(PREVIOUS_TARGET_STATE_NAMES),)):
             raise ValueError("checkpoint state layout differs from this training adapter")
+        self.include_previous_target = shape == (len(PREVIOUS_TARGET_STATE_NAMES),)
         self.preprocess, self.postprocess = make_pre_post_processors(
             self.model.config,
             pretrained_path=str(checkpoint),
@@ -28,7 +34,16 @@ class SmolPolicy:
         )
 
     @torch.inference_mode()
-    def predict(self, task: str, state: np.ndarray, image: np.ndarray) -> np.ndarray:
+    def predict(
+        self,
+        task: str,
+        state: np.ndarray,
+        image: np.ndarray,
+        previous_target: np.ndarray | None = None,
+    ) -> np.ndarray:
+        state = policy_state(
+            state, previous_target, include_previous_target=self.include_previous_target
+        )
         # Each request is independent, as required by the existing Policy protocol.
         self.model.reset()
         batch = self.preprocess(
@@ -69,5 +84,10 @@ class SmolPolicy:
                 io.BytesIO(base64.b64decode(observation.images["head"].jpeg_base64))
             ).convert("RGB")
         )
-        positions = self.predict(request.task, state, image)
+        previous = (
+            np.asarray(observation.previous_target)
+            if observation.previous_target is not None
+            else None
+        )
+        positions = self.predict(request.task, state, image, previous)
         return ActionChunk(observation_t_ns=observation.t_ns, positions=positions.tolist())

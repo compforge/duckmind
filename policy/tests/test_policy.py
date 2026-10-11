@@ -126,3 +126,16 @@ def test_runner_trims_elapsed_prefix_without_rebasing_time():
         submission(chunk, req, session, 4, req.observation.t_ns + 50 * STEP_NS)
     with pytest.raises(ValueError, match="timestamp"):
         submission(chunk, request(t_ns=2_000_000_000), session, 4, 2_000_000_000)
+
+
+def test_previous_target_is_optional_but_validated_and_round_trips():
+    req = request()
+    assert req.observation.previous_target is None
+    req.observation.previous_target = [0.25] * 15
+    parsed = PredictRequest.model_validate_json(req.model_dump_json())
+    assert parsed.observation.previous_target == [0.25] * 15
+    for bad in ([0.0] * 14, [float("nan")] * 15, [4.0] * 15):
+        data = req.model_dump()
+        data["observation"]["previous_target"] = bad
+        with pytest.raises(ValidationError):
+            PredictRequest.model_validate(data)

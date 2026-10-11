@@ -57,7 +57,10 @@ def evaluate(
             for start in starts[:per_episode]:
                 before = time.perf_counter()
                 prediction = model.predict(
-                    episode["task"], frames["state"][start], frames["image"][start]
+                    episode["task"],
+                    frames["state"][start],
+                    frames["image"][start],
+                    frames["previous_target"][start] if model.include_previous_target else None,
                 )
                 times.append(time.perf_counter() - before)
                 truth = frames["action"][start : start + len(prediction)]
@@ -73,6 +76,7 @@ def evaluate(
     report = {
         "checkpoint": str(checkpoint),
         "chunk_size": chunk_size,
+        "include_previous_target": model.include_previous_target,
         "held_out_chunks": len(errors),
         "action_mse_rad2": float(np.mean(errors)),
         "inference_seconds_median": float(np.median(times)),
@@ -103,7 +107,9 @@ def evaluate(
                         for tick in range(round(manifest["seconds"] * FPS)):
                             if tick % horizon == 0:
                                 state, image = simulation.observe()
-                                predictions = model.predict(text, state, image)
+                                predictions = model.predict(
+                                    text, state, image, simulation.previous_target()
+                                )
                             action = predictions[tick % horizon]
                             if not np.isfinite(action).all() or np.any(np.abs(action) > np.pi):
                                 stable = False

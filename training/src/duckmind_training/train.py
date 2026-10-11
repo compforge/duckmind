@@ -9,7 +9,7 @@ from lerobot.configs.train import TrainPipelineConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.scripts.lerobot_train import train
 
-from duckmind_training.contract import STATE_NAMES
+from duckmind_training.contract import PREVIOUS_TARGET_STATE_NAMES, STATE_NAMES
 from duckmind_training.initialization import expanded_state_checkpoint
 
 
@@ -27,13 +27,16 @@ def main() -> None:
     metadata = json.loads((args.dataset / "meta/info.json").read_text())
     if metadata["fps"] != 50 or metadata["features"]["action"]["shape"] != [15]:
         raise ValueError("expected the Microduck 50 Hz / 15-joint dataset")
-    if metadata["features"]["observation.state"]["names"] != list(STATE_NAMES):
+    state_names = tuple(metadata["features"]["observation.state"]["names"])
+    if state_names not in (STATE_NAMES, PREVIOUS_TARGET_STATE_NAMES):
         raise ValueError("dataset state names differ from the model adapter")
+    if metadata["features"]["observation.state"]["shape"] != [len(state_names)]:
+        raise ValueError("dataset state shape and names disagree")
     revision = (
         "5e8d12a6e2975b0e5e5fce7c8caf47c371d257b6" if args.model == "lerobot/smolvla_base" else None
     )
     initial = expanded_state_checkpoint(
-        args.model, revision, args.output.with_name(args.output.name + "-initial"), len(STATE_NAMES)
+        args.model, revision, args.output.with_name(args.output.name + "-initial"), len(state_names)
     )
     policy = SmolVLAConfig.from_pretrained(str(initial))
     policy.pretrained_path = initial.resolve()

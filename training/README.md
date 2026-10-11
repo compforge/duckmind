@@ -91,6 +91,22 @@ limited lateral drift, and an upright final second with continued forward progre
 control must pass the same gates. Failed attempts remain visible; a run lacking accepted data in
 either split fails conversion. Detailed boundaries are in the [data design](../docs/design/vla-training.md).
 
+## Add the previous applied target
+
+Keep old datasets/checkpoints and create a new dataset version:
+
+```bash
+uv run --extra train duckmind-dataset --raw artifacts/raw-v2 \
+  --output artifacts/dataset-v7-forward-previous-target \
+  --tasks forward --include-previous-target
+```
+
+This reuses the original forward train/eval episodes. State grows from 36 to 51 features;
+labels remain future absolute joint targets. The new 15 features are the target held before
+this observation, including the first frame after preparation. New checkpoints require this
+signal at inference; the evaluator reads it from BAM after the actually executed chunk prefix.
+This is one previous action, not a multi-frame history. See [semantics](../docs/design/vla-training.md#optional-previous-target-input).
+
 ## Fine-tune and evaluate
 
 ```bash

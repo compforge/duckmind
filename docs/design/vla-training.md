@@ -24,12 +24,13 @@ The target is taken from BAM's position target, not `data.ctrl` (which contains 
 The 14-actuator alpha model has no physical mouth joint. Both measured mouth position and commanded
 mouth position are recorded as zero at robotd's mouth slot. This is an explicit simulation mapping,
 not a demonstration of mouth actuation. Measured joint velocities are required at inference as well as collection. The raw files also
-retain `previous_target`, the last actually applied joint target before each observation. It stays
-out of model features because the current Policy request does not carry applied-action feedback;
-using a predicted but unexecuted action there would create a train/inference mismatch.
+retain `previous_target`, the last actually applied joint target before each observation. The optional
+51-state layout appends this value to model input; the original 36-state layout leaves it out.
+Using a predicted but unexecuted action would create a train/inference mismatch. See the
+[previous-target contract](#optional-previous-target-input).
 
 The state width exceeds SmolVLA base's 32-column state projection. Initialization creates a native
-checkpoint with a 36-column projection, preserves existing columns and zero-initializes the added
+checkpoint with a 36- or 51-column projection, preserves existing columns and zero-initializes the added
 columns; all other weights are unchanged. The state projection is then trained. Checkpoint and raw
 state layouts are checked before use; historical 21-state artifacts require their original adapter.
 
@@ -114,3 +115,27 @@ this collector does not modify an existing dataset or launch training automatica
 Expert-assisted success validates the corrective labels, not the student's ability to recover.
 Reports therefore preserve both unassisted controls and expert corrections, rejected traces,
 checkpoint/teacher identities and inference timing. Physics still pauses for student inference.
+
+## Optional previous-target input
+
+`duckmind-dataset --include-previous-target` creates a separate dataset with a 51-dimensional
+`observation.state`: the existing 36 body features followed by 15 previous absolute joint targets
+in radians. `--tasks forward` selects complete forward episodes without changing their split.
+Raw trajectories already contain this signal, so no new expert collection is required.
+
+At time t, the appended value is the actuator target applied before observing state t. For t>0,
+it equals action[t-1]; the first sample retains the actual target from preparation or intervention.
+It is not a full history window, not the observed joint pose, and not the last frame of a predicted
+chunk. Conversion rejects misaligned history; conversion and inference share `policy_state`.
+Each prediction in MuJoCo reads the current BAM target, including after partial chunk execution.
+
+Checkpoints select their 36/51 input layout, retain their own processors, and output the same
+50 Hz absolute-joint Action Chunk. A 51-state HTTP request must supply `observation.previous_target`.
+The stock robotd Runner does not yet expose this applied-target signal or camera input.
+
+Conversion uses the native LeRobot float64 statistics calculator for numerical features and
+repairs both per-episode metadata and aggregate statistics after finalization. Frames remain
+float32. This avoids float32 second-moment cancellation in almost-constant IMU channels, including
+when a later native split/merge recomputes aggregate statistics. Train and eval statistics remain
+separate; only train statistics normalize the model. Projection padding preserves old weights,
+but changed normalization can still change behavior: smoke verification is not an efficacy result.

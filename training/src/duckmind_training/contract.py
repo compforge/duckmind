@@ -22,6 +22,24 @@ IMAGE_KEY = "observation.images.head"
 MICRODUCK_RL_REVISION = "8d0db74916a4f833d1d9b95d6a1d7f4d13b9d5ec"
 
 
+PREVIOUS_TARGET_STATE_NAMES = (*STATE_NAMES, *(f"{name}_previous_target" for name in JOINT_NAMES))
+
+
+def policy_state(
+    state: np.ndarray, previous_target: np.ndarray | None, *, include_previous_target: bool
+) -> np.ndarray:
+    """Append the target applied before this observation, never the next action label."""
+    if state.shape[-1:] != (len(STATE_NAMES),):
+        raise ValueError("expected the 36-dimensional body state")
+    if not include_previous_target:
+        return state.astype(np.float32)
+    if previous_target is None or previous_target.shape != (*state.shape[:-1], len(JOINT_NAMES)):
+        raise ValueError("previous_target must contain 15 applied targets per observation")
+    if not np.isfinite(previous_target).all():
+        raise ValueError("previous_target must be finite")
+    return np.concatenate((state, previous_target), axis=-1).astype(np.float32)
+
+
 def wire_positions(positions: np.ndarray) -> np.ndarray:
     """Insert the alpha body's absent mouth in robotd joint order (also for velocities)."""
     if positions.shape != (14,):

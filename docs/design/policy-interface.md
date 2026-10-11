@@ -37,6 +37,7 @@ body-specific contract, not an industry standard and not a promise of cross-embo
 | `task` | Free-form nonempty text. The API has no command enum. |
 | `observation.t_ns` | Positive robotd monotonic timestamp in nanoseconds, from `robot.state`. |
 | `observation.positions` | 15 measured absolute joint angles, radians, in robotd `JOINT_NAMES` order. |
+| `observation.previous_target` | Optional 15 absolute-radian joint targets actually applied before this observation, in `JOINT_NAMES` order. Missing means unavailable; never substitute measured positions or queued predictions. |
 | `observation.velocities` | Optional 15 measured velocities, rad/s; absent means unavailable. |
 | `observation.imu` | Optional `gyro` (trunk rad/s), `quat` (trunk→world, scalar-first wxyz). |
 | `observation.images` | Optional map of camera name to `{t_ns, jpeg_base64}`; image capture time uses the same robot clock and cannot be newer than the observation. |
@@ -46,7 +47,11 @@ History is explicit and each inference request is independent: there is no serve
 conversation or hidden per-robot temporal state. A model needing a context window builds it
 from these samples; a model needing a different history contract requires a versioned change.
 The stock runner sends recent body states only, with IMU/velocities when available. Camera
-capture, synchronization, and JPEG conversion are not implemented by this runner yet. An
+capture, synchronization, JPEG conversion and applied-target feedback are not implemented by this runner yet.
+The 51-state SmolVLA adapter requires `previous_target` on each request, including the first
+sample after initialization; its observation source must provide the target held at that time.
+The 36-state adapter remains usable without this optional field. Older strict-schema servers
+reject the new field, so deploy the updated model service before sending it. An
 image-aware collector should use the existing WebRTC consumer path, preserve capture times,
 and form the same `PredictRequest`; do not invent a separate camera transport.
 

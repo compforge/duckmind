@@ -119,6 +119,10 @@ class Simulation:
         w, x, y, z = self.data.qpos[self.root + 3 : self.root + 7]
         return float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
 
+    def previous_target(self) -> np.ndarray:
+        """Applied actuator command at observation time, including the prepare/warmup target."""
+        return wire_positions(self.bam.q_target.copy())
+
     def observe(self) -> tuple[np.ndarray, np.ndarray]:
         positions = self.data.qpos[self.expert.joint_qpos_indices]
         state = state_vector(

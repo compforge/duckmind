@@ -96,7 +96,7 @@ def learner_rollout(
         if tick % execute_steps == 0:
             state, image = simulation.observe()
             start = time.perf_counter()
-            predictions = policy.predict(text, state, image)
+            predictions = policy.predict(text, state, image, simulation.previous_target())
             latencies.append(time.perf_counter() - start)
         action = predictions[tick % execute_steps]
         if not np.isfinite(action).all() or np.any(np.abs(action) > np.pi):

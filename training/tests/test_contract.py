@@ -61,3 +61,23 @@ def test_conversion_requires_declared_task_coverage_and_complete_ids():
     episodes[-1]["accepted"] = False
     with pytest.raises(ValueError, match="missing successful tasks.*eval"):
         validate_rollouts(episodes, 2, families)
+
+
+def test_previous_target_batch_and_online_state_are_identical():
+    from duckmind_training.contract import PREVIOUS_TARGET_STATE_NAMES, policy_state
+
+    states = np.arange(4 * 36, dtype=np.float32).reshape(4, 36)
+    actions = np.arange(4 * 15, dtype=np.float32).reshape(4, 15) / 100
+    # First observation follows warmup; it must not use zeros or action[0].
+    previous = np.concatenate((np.full((1, 15), 0.7, dtype=np.float32), actions[:-1]))
+    batch = policy_state(states, previous, include_previous_target=True)
+    assert batch.shape == (4, len(PREVIOUS_TARGET_STATE_NAMES)) == (4, 51)
+    for i in range(4):
+        online = policy_state(states[i], previous[i], include_previous_target=True)
+        np.testing.assert_array_equal(batch[i], online)
+    np.testing.assert_array_equal(batch[:, :36], states)
+    np.testing.assert_array_equal(batch[:, 36:], previous)
+    np.testing.assert_array_equal(policy_state(states, None, include_previous_target=False), states)
+    for bad in (None, np.zeros((4, 14)), np.full((4, 15), np.nan)):
+        with pytest.raises(ValueError, match="previous_target"):
+            policy_state(states, bad, include_previous_target=True)
