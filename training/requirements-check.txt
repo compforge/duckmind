@@ -1,0 +1,5 @@
+# CPU-only contract checks also run on macOS, without installing the CUDA training stack.
+numpy==2.2.6
+pydantic==2.14.0
+pytest==9.1.1
+ruff==0.17.0

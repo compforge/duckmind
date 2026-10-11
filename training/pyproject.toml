@@ -1,0 +1,58 @@
+[project]
+name = "duckmind-training"
+version = "0.1.0"
+description = "Microduck expert demonstrations and SmolVLA fine-tuning"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "duckmind-policy",
+  "numpy==2.2.6",
+]
+
+[project.optional-dependencies]
+train = [
+  "lerobot[smolvla,training]; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "torch==2.7.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "torchvision==0.22.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "torchcodec==0.4.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "mujoco==3.10.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "onnxruntime==1.24.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "better-actuator-models; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[project.scripts]
+duckmind-collect = "duckmind_training.collect:main"
+duckmind-dataset = "duckmind_training.dataset:main"
+duckmind-train = "duckmind_training.train:main"
+duckmind-evaluate = "duckmind_training.evaluate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+environments = [
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'darwin'",
+]
+
+[tool.uv.sources]
+duckmind-policy = { path = "../policy", editable = true }
+lerobot = { url = "https://github.com/huggingface/lerobot/archive/d40e8709cffb93644db66e30604ef50fdec003cb.zip" }
+better-actuator-models = { url = "https://github.com/Rhoban/bam/archive/62bd8ce12154340be97e06f7f41a0ca8f116d967.zip" }
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

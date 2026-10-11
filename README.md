@@ -10,16 +10,17 @@ collect demonstrations, train a policy, execute its predictions in MuJoCo, and e
 
 1. Use Microduck's existing command-driven motion policies to generate demonstrations.
 2. Pair each command with multiple equivalent text instructions and the corresponding state/action trajectories.
-3. Train a policy to predict **action chunks**—sequences of joint targets—from text and body observations.
+3. Train a VLA to predict **action chunks**—sequences of joint targets—from text, camera images and body state.
 
 ```text
-Text + body state/history → learned policy → action chunk → robotd → robot motion
+LLM → text task + camera/body observations → VLA → action chunk → robotd → robot motion
 ```
 
-Start with a language-conditioned motion policy, then add visual observations to explore
-vision-language-action (VLA) models. The model learns the motion; `robotd` owns timed execution
-and feedback. A [replaceable Policy interface and Fake backend](policy/README.md) exercise this
-execution path before training a model. Training and learned model integration are ongoing work.
+The high-level LLM handles conversation and task planning; the VLA learns motion from demonstrations.
+`robotd` owns timed execution and feedback. A [replaceable Policy interface and Fake backend](policy/README.md) exercise this
+execution path before training a model. [Training tools](training/README.md) collect expert
+demonstrations and fine-tune SmolVLA, with separate offline and physical evaluation. Learned
+robotd integration and reliable motion remain subject to evaluation.
 
 ## Origin
 
