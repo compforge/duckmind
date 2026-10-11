@@ -9,23 +9,36 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from duckmind_training.contract import FPS, TASKS, episode_success
+from duckmind_training.contract import FPS, STATE_NAMES, TASKS, episode_success
 from duckmind_training.learned import SmolPolicy
 from duckmind_training.simulation import Simulation
 
 
 def evaluate(
-    checkpoint: Path, raw: Path, output: Path, upstream: Path | None, teacher: Path | None
+    checkpoint: Path,
+    raw: Path,
+    output: Path,
+    upstream: Path | None,
+    teacher: Path | None,
+    execute_steps: list[int],
+    seeds: list[int],
+    max_held_out_chunks: int,
 ) -> None:
+    if not seeds or not execute_steps or any(n < 1 or n > 50 for n in execute_steps):
+        raise ValueError("provide seeds and execution horizons within 1..50 steps")
     torch.manual_seed(42)
     model = SmolPolicy(checkpoint)
     manifest = json.loads((raw / "manifest.json").read_text())
+    if manifest["state_names"] != list(STATE_NAMES):
+        raise ValueError("raw state layout differs from the model adapter")
     held_out = [e for e in manifest["episodes"] if e["split"] == "eval" and e["accepted"]]
     errors, times = [], []
     sample = None
     for episode in held_out:
         with np.load(raw / f"{episode['id']}.npz") as frames:
-            for start in range(0, len(frames["state"]) - 49, 50):
+            starts = list(range(0, len(frames["state"]) - 49, 50))
+            per_episode = max(1, max_held_out_chunks // len(held_out))
+            for start in starts[:per_episode]:
                 before = time.perf_counter()
                 prediction = model.predict(
                     episode["task"], frames["state"][start], frames["image"][start]
@@ -53,38 +66,46 @@ def evaluate(
         simulation = Simulation(upstream, teacher)
         trials = []
         try:
-            for task in TASKS:
-                # Expert is used only for initial settling; every recorded step uses the VLA.
-                simulation.reset(10042)
-                stable = True
-                predictions = []
-                for tick in range(round(manifest["seconds"] * FPS)):
-                    if tick % 10 == 0:
-                        state, image = simulation.observe()
-                        predictions = model.predict(task.texts[-1], state, image).tolist()
-                    action = np.asarray(predictions[tick % 10])
-                    if not np.isfinite(action).all() or np.any(np.abs(action) > np.pi):
-                        stable = False
-                        break
-                    simulation.apply(action)
-                    stable = stable and bool(simulation.metrics()["stable"])
-                    if not stable:
-                        break
-                metrics = simulation.metrics()
-                trials.append(
-                    {
-                        "task": task.texts[-1],
-                        "ticks": tick + 1,
-                        "metrics": metrics,
-                        "success": episode_success(
-                            task,
-                            float(metrics["displacement_m"]),
-                            float(metrics["head_yaw_rad"]),
-                            stable,
-                        ),
-                    }
-                )
-                logging.info("physics trial=%s", trials[-1])
+            for horizon in execute_steps:
+                for seed in seeds:
+                    for template in TASKS:
+                        if template.name not in manifest["task_families"]:
+                            continue
+                        task = template.sample(seed)
+                        # The teacher only prepares the initial state; recorded steps use VLA.
+                        simulation.prepare(task, seed)
+                        stable = bool(simulation.metrics()["stable"])
+                        predictions = []
+                        torch.manual_seed(seed)
+                        for tick in range(round(manifest["seconds"] * FPS)):
+                            if tick % horizon == 0:
+                                state, image = simulation.observe()
+                                predictions = model.predict(task.texts[-1], state, image)
+                            action = predictions[tick % horizon]
+                            if not np.isfinite(action).all() or np.any(np.abs(action) > np.pi):
+                                stable = False
+                                break
+                            simulation.apply(action)
+                            stable = stable and bool(simulation.metrics()["stable"])
+                            if not stable:
+                                break
+                        metrics = simulation.metrics()
+                        trials.append(
+                            {
+                                "task_family": task.name,
+                                "task": task.texts[-1],
+                                "seed": seed,
+                                "execute_steps": horizon,
+                                "ticks": tick + 1,
+                                "metrics": metrics,
+                                "success": episode_success(task, metrics, stable),
+                            }
+                        )
+                        logging.info("physics trial=%s", trials[-1])
+                        # Preserve completed trials if a later trial fails or is interrupted.
+                        report["physics"] = {"status": "running", "trials": trials}
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        output.write_text(json.dumps(report, indent=2, ensure_ascii=False))
         finally:
             simulation.close()
         # Synchronous stepping pauses physics during inference. It is not a real-time runner test.
@@ -105,6 +126,18 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--upstream", type=Path)
     parser.add_argument("--teacher", type=Path)
+    parser.add_argument("--execute-steps", nargs="+", type=int, default=[10])
+    parser.add_argument("--seeds", nargs="+", type=int, default=[10042])
+    parser.add_argument("--max-held-out-chunks", type=int, default=40)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    evaluate(args.checkpoint, args.raw, args.output, args.upstream, args.teacher)
+    evaluate(
+        args.checkpoint,
+        args.raw,
+        args.output,
+        args.upstream,
+        args.teacher,
+        args.execute_steps,
+        args.seeds,
+        args.max_held_out_chunks,
+    )

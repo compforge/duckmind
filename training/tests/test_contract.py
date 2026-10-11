@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from duckmind_training.contract import (
+    STATE_NAMES,
     TASKS,
     episode_success,
     split_for,
@@ -11,15 +12,16 @@ from duckmind_training.contract import (
 )
 
 
-def test_mouth_mapping_preserves_right_leg_and_state_has_no_command():
+def test_joint_mapping_and_state_have_no_teacher_command():
     joints = np.arange(14, dtype=np.float32)
     mapped = wire_positions(joints)
     np.testing.assert_array_equal(mapped[:9], joints[:9])
     assert mapped[9] == 0
     np.testing.assert_array_equal(mapped[10:], joints[9:])
-    state = state_vector(joints, np.array([1, 2, 3]), np.array([0, 0, -1]))
-    assert state.shape == (21,)
-    np.testing.assert_array_equal(state[-6:], [1, 2, 3, 0, 0, -1])
+    state = state_vector(mapped, np.array([1, 2, 3]), np.array([0, 0, -1]), mapped + 20)
+    assert state.shape == (len(STATE_NAMES),) == (36,)
+    np.testing.assert_array_equal(state[15:21], [1, 2, 3, 0, 0, -1])
+    np.testing.assert_array_equal(state[21:], mapped + 20)
 
 
 def test_split_reserves_complete_rollouts():
@@ -28,23 +30,34 @@ def test_split_reserves_complete_rollouts():
         split_for(0, 1)
 
 
-def test_reject_fallen_and_wrong_direction_demonstrations():
-    forward = TASKS[1]
-    assert episode_success(forward, 0.1, 0, True) is True
-    assert not episode_success(forward, -0.1, 0, True)
-    assert not episode_success(forward, 0.1, 0, False)
-    assert not episode_success(TASKS[3], 0, -0.3, True)
+def test_outcomes_reject_wrong_direction_falls_and_false_stops():
+    tasks = {t.name: t for t in TASKS}
+    metrics = dict(forward_m=0.1, left_m=0.2, yaw_rad=0.3, head_yaw_delta=0.3, tail_speed_mps=0.03)
+    assert episode_success(tasks["forward"], metrics, True)
+    assert episode_success(tasks["strafe_left"], metrics, True)
+    assert episode_success(tasks["turn_left"], metrics, True)
+    assert not episode_success(tasks["backward"], metrics, True)
+    assert not episode_success(tasks["strafe_right"], metrics, True)
+    assert not episode_success(tasks["strafe_left"], {**metrics, "yaw_rad": 1.0}, True)
+    assert not episode_success(tasks["turn_right"], metrics, True)
+    assert not episode_success(tasks["forward"], metrics, False)
+    assert not episode_success(tasks["look_right"], metrics, True)
+    assert episode_success(tasks["stop_forward"], metrics, True)
+    assert not episode_success(tasks["stop_forward"], {**metrics, "tail_speed_mps": 0.2}, True)
 
 
-def test_conversion_requires_complete_collection_and_successful_coverage():
+def test_conversion_requires_declared_task_coverage_and_complete_ids():
+    families = [t.name for t in TASKS]
     episodes = [
-        {"task_family": task.name, "split": split, "accepted": True}
-        for split in ("train", "eval")
+        {"id": f"{i:04d}-{task.name}", "task_family": task.name, "split": split, "accepted": True}
+        for i, split in enumerate(("train", "eval"))
         for task in TASKS
     ]
-    validate_rollouts(episodes, 2)
+    validate_rollouts(episodes, 2, families)
     with pytest.raises(ValueError, match="incomplete"):
-        validate_rollouts(episodes[:-1], 2)
+        validate_rollouts(episodes[:-1], 2, families)
+    with pytest.raises(ValueError, match="incomplete"):
+        validate_rollouts([e for e in episodes if e["task_family"] != "stand"], 2, families)
     episodes[-1]["accepted"] = False
     with pytest.raises(ValueError, match="missing successful tasks.*eval"):
-        validate_rollouts(episodes, 2)
+        validate_rollouts(episodes, 2, families)

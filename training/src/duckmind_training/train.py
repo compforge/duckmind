@@ -9,6 +9,9 @@ from lerobot.configs.train import TrainPipelineConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.scripts.lerobot_train import train
 
+from duckmind_training.contract import STATE_NAMES
+from duckmind_training.initialization import expanded_state_checkpoint
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -18,18 +21,25 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=8)
     args = parser.parse_args()
+    if args.output.exists():
+        raise FileExistsError(args.output)
     metadata = json.loads((args.dataset / "meta/info.json").read_text())
     if metadata["fps"] != 50 or metadata["features"]["action"]["shape"] != [15]:
         raise ValueError("expected the Microduck 50 Hz / 15-joint dataset")
+    if metadata["features"]["observation.state"]["names"] != list(STATE_NAMES):
+        raise ValueError("dataset state names differ from the model adapter")
     revision = (
         "5e8d12a6e2975b0e5e5fce7c8caf47c371d257b6" if args.model == "lerobot/smolvla_base" else None
     )
-    policy = SmolVLAConfig.from_pretrained(args.model, revision=revision)
-    policy.pretrained_path = Path(args.model)
-    policy.pretrained_revision = revision
+    initial = expanded_state_checkpoint(
+        args.model, revision, args.output.with_name(args.output.name + "-initial"), len(STATE_NAMES)
+    )
+    policy = SmolVLAConfig.from_pretrained(str(initial))
+    policy.pretrained_path = initial.resolve()
+    policy.pretrained_revision = None
     # The CLI merges feature dictionaries, so passing {} retains the original three
     # cameras. Clear them explicitly: native make_policy derives our camera/state/action
-    # features from the dataset, while the padded weight dimensions remain unchanged.
+    # features from the dataset, using the explicitly adapted state projection.
     policy.input_features = {}
     policy.output_features = {}
     policy.device = "cuda"

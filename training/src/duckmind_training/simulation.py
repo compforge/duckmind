@@ -2,13 +2,14 @@
 
 import importlib.util
 import sys
+from collections import deque
 from pathlib import Path
 
 import mujoco
 import numpy as np
 import onnxruntime as ort
 
-from duckmind_training.contract import IMAGE_SIZE, JOINT_NAMES, Task, state_vector
+from duckmind_training.contract import IMAGE_SIZE, JOINT_NAMES, Task, state_vector, wire_positions
 
 
 class Simulation:
@@ -56,6 +57,11 @@ class Simulation:
 
         self.camera = Camera(self.model, "head_camera", width=IMAGE_SIZE, height=IMAGE_SIZE)
         self.root = self.expert._trunk_qpos_adr
+        root_joint = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint"
+        )
+        self.root_velocity = int(self.model.jnt_dofadr[root_joint])
+        self.tail_speeds = deque(maxlen=50)
         self.reset(0)
 
     def reset(self, seed: int) -> None:
@@ -75,19 +81,51 @@ class Simulation:
         self.expert.head_offset[:] = 0
         self.expert.set_vel_cmd()
         mujoco.mj_forward(self.model, self.data)
+        self.mark_origin()
         # Warm up under the expert before recording; settling is not task demonstration.
         for _ in range(50):
             self.teacher_step()
+        # Break rotationally equivalent resets: the learner must handle small physical errors.
+        self.data.qpos[self.expert.joint_qpos_indices] += rng.uniform(-0.005, 0.005, 14)
+        self.data.qvel[self.root_velocity : self.root_velocity + 2] += rng.uniform(-0.02, 0.02, 2)
+        self.data.qvel[self.root_velocity + 3 : self.root_velocity + 6] += rng.uniform(-0.1, 0.1, 3)
+        mujoco.mj_forward(self.model, self.data)
+        self.mark_origin()
+
+    def mark_origin(self) -> None:
         self.origin = self.data.qpos[self.root : self.root + 2].copy()
+        self.previous_xy = self.origin.copy()
+        self.tail_speeds.clear()
+        self.origin_yaw = self.yaw()
+        self.yaw_travel = 0.0
+        self.previous_yaw = self.origin_yaw
+
+    def prepare(self, task: Task, seed: int) -> None:
+        self.reset(seed)
+        if any(task.initial_twist):
+            self.expert.set_vel_cmd(*task.initial_twist)
+            for _ in range(100):
+                self.teacher_step()
+            # Stop examples start from an actually moving body, never a stationary reset.
+            if not self.metrics()["stable"] or np.mean(self.tail_speeds) < 0.06:
+                raise ValueError(f"expert cannot prepare moving start for {task.name}")
+        self.mark_origin()
 
     def command(self, task: Task) -> None:
-        self.expert.head_offset[2] = task.head_yaw
-        self.expert.set_vel_cmd(lin_vel_x=task.vx)
+        self.expert.head_offset[:] = task.head
+        self.expert.set_vel_cmd(*task.twist)
+
+    def yaw(self) -> float:
+        w, x, y, z = self.data.qpos[self.root + 3 : self.root + 7]
+        return float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
 
     def observe(self) -> tuple[np.ndarray, np.ndarray]:
         positions = self.data.qpos[self.expert.joint_qpos_indices]
         state = state_vector(
-            positions, self.expert.get_base_ang_vel(), self.expert.get_projected_gravity()
+            wire_positions(positions),
+            self.expert.get_base_ang_vel(),
+            self.expert.get_projected_gravity(),
+            wire_positions(self.expert.get_joint_vel()),
         )
         self.camera.renderer.update_scene(self.data, camera=self.camera.camera)
         image = np.rot90(self.camera.renderer.render(), k=-1).copy()
@@ -104,6 +142,14 @@ class Simulation:
         for _ in range(4):
             self.bam.update()
             mujoco.mj_step(self.model, self.data)
+        xy = self.data.qpos[self.root : self.root + 2].copy()
+        self.tail_speeds.append(float(np.linalg.norm(xy - self.previous_xy) * 50))
+        self.previous_xy = xy
+        yaw = self.yaw()
+        self.yaw_travel += float(
+            np.arctan2(np.sin(yaw - self.previous_yaw), np.cos(yaw - self.previous_yaw))
+        )
+        self.previous_yaw = yaw
 
     def apply(self, targets: np.ndarray) -> None:
         self.expert.set_position_targets(np.delete(targets, JOINT_NAMES.index("mouth")))
@@ -111,13 +157,22 @@ class Simulation:
 
     def metrics(self) -> dict[str, float | bool]:
         delta = self.data.qpos[self.root : self.root + 2] - self.origin
-        displacement = float(delta @ np.array([np.cos(self.initial_yaw), np.sin(self.initial_yaw)]))
+        c, s = np.cos(self.origin_yaw), np.sin(self.origin_yaw)
         z = float(self.data.qpos[self.root + 2])
         gravity_z = float(self.expert.get_projected_gravity()[2])
+        relative = self.expert.get_joint_pos_relative()
         return {
-            "displacement_m": displacement,
+            "forward_m": float(delta @ np.array([c, s])),
+            "left_m": float(delta @ np.array([-s, c])),
+            "yaw_rad": self.yaw_travel,
+            "tail_speed_mps": float(np.mean(self.tail_speeds)) if self.tail_speeds else 0.0,
             "trunk_z_m": z,
-            "head_yaw_rad": float(self.data.qpos[self.expert.joint_qpos_indices[7]]),
+            **{
+                name: float(relative[i + 5])
+                for i, name in enumerate(
+                    ("neck_pitch_delta", "head_pitch_delta", "head_yaw_delta", "head_roll_delta")
+                )
+            },
             "stable": bool(z > 0.075 and gravity_z < -0.65 and np.isfinite(self.data.qpos).all()),
         }
 

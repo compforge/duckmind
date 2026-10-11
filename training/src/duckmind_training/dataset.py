@@ -15,7 +15,9 @@ from duckmind_training.contract import FPS, IMAGE_KEY, IMAGE_SIZE, STATE_NAMES, 
 
 def convert(raw: Path, output: Path) -> None:
     manifest = json.loads((raw / "manifest.json").read_text())
-    validate_rollouts(manifest["episodes"], manifest["repetitions"])
+    validate_rollouts(manifest["episodes"], manifest["repetitions"], manifest["task_families"])
+    if manifest["state_names"] != list(STATE_NAMES):
+        raise ValueError("raw state layout differs from this training adapter; recollect the data")
     features = {
         "observation.state": {
             "dtype": "float32",

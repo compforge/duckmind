@@ -4,8 +4,9 @@ Generate language-labelled Microduck demonstrations in MuJoCo, convert them to L
 and fine-tune SmolVLA to produce joint Action Chunks. The teacher's command vector is used only
 to generate demonstrations; the learned model receives language, head-camera RGB and body state.
 
-The first dataset covers standing, walking forward/backward and looking left/right. This is a
-training-pipeline baseline, not evidence of reliable walking or general language understanding.
+The collection catalog covers standing, translation, turning, head direction and stopping from
+motion. Select only tasks whose expert passes physical checks. This is a training pipeline, not
+evidence of reliable learned walking or general language understanding.
 Task outcomes must be checked separately from training loss.
 
 ## Environment
@@ -34,13 +35,19 @@ The collector records a teacher checksum and upstream script checksum with every
 uv run --extra train duckmind-collect \
   --upstream /path/to/microduck_rl \
   --teacher /path/to/velstand.onnx \
-  --output artifacts/raw-v1 --repetitions 12 --seconds 4
-uv run --extra train duckmind-dataset --raw artifacts/raw-v1 --output artifacts/dataset-v1
+  --output artifacts/raw-v2 --repetitions 12 --seconds 4 --seed 242 \
+  --tasks stand forward backward turn_left turn_right look_left look_right \
+          look_up look_down stop_forward stop_backward
+uv run --extra train duckmind-dataset --raw artifacts/raw-v2 --output artifacts/dataset-v2
 ```
 
 Collection uses an isolated in-process simulator, so it does not commandeer a running robotd or
-browser demo. Each episode has 200 synchronized observation/target frames at 50 Hz. Twelve
-repetitions of five tasks produce up to 60 accepted episodes. Complete initial-condition seeds
+browser demo. At four seconds, each episode has 200 synchronized observation/target frames
+at 50 Hz. Twelve
+repetitions of the eleven selected tasks produce up to 132 accepted episodes. The raw files also
+retain the preceding executed target. Sideways tasks are available in the catalog but excluded
+from this recipe: the current expert either barely moved or developed substantial yaw in probes.
+Complete initial-condition seeds
 are held out together; evaluation additionally uses a reserved paraphrase. Failed/fallen episodes
 are recorded in `manifest.json` but excluded from training. Empty task/split coverage fails the run.
 
@@ -52,15 +59,16 @@ The [data design](../docs/design/vla-training.md) explains units and model input
 
 ```bash
 # Smoke run first; each output directory belongs to one run.
-uv run --extra train duckmind-train --dataset artifacts/dataset-v1/train \
-  --output artifacts/smolvla-smoke --steps 20 --batch-size 4
-uv run --extra train duckmind-train --dataset artifacts/dataset-v1/train \
-  --output artifacts/smolvla-v1 --steps 1000 --batch-size 8
+uv run --extra train duckmind-train --dataset artifacts/dataset-v2/train \
+  --output artifacts/smolvla-v2-smoke --steps 20 --batch-size 4
+uv run --extra train duckmind-train --dataset artifacts/dataset-v2/train \
+  --output artifacts/smolvla-v2 --steps 2000 --batch-size 8
 
 uv run --extra train duckmind-evaluate \
-  --checkpoint artifacts/smolvla-v1/checkpoints/last/pretrained_model \
-  --raw artifacts/raw-v1 --output artifacts/evaluation-v1.json \
-  --upstream /path/to/microduck_rl --teacher /path/to/velstand.onnx
+  --checkpoint artifacts/smolvla-v2/checkpoints/last/pretrained_model \
+  --raw artifacts/raw-v2 --output artifacts/evaluation-v2.json \
+  --upstream /path/to/microduck_rl --teacher /path/to/velstand.onnx \
+  --execute-steps 5 10 --seeds 10042 10043
 ```
 
 Training freezes the VLM and trains the Action Expert and state projection from the pretrained
@@ -74,7 +82,7 @@ physical task outcomes. Physics pauses while inference runs; this is a **delay-f
 evaluation**, not proof that real-time execution meets the robotd deadline. There is no claimed
 real-hardware validation. A low loss alone is not sufficient to replace the balancing controller.
 
-`SmolPolicy` implements `duckmind_policy.Policy.infer`; it requires head-camera images and IMU.
+`SmolPolicy` implements `duckmind_policy.Policy.infer`; it requires joint velocities, head-camera images and IMU.
 The existing stock robotd Runner collects body states only, so this change does not by itself
 provide a camera-enabled online robotd loop. The adapter can be passed to the existing HTTP
 `create_app` after a camera-aware caller is supplied. See the [model contract](../docs/design/policy-interface.md).

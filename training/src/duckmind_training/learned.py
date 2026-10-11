@@ -11,12 +11,16 @@ from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from PIL import Image
 
-from duckmind_training.contract import IMAGE_KEY
+from duckmind_training.contract import IMAGE_KEY, STATE_NAMES, state_vector
 
 
 class SmolPolicy:
     def __init__(self, checkpoint: Path, device: str = "cuda"):
         self.model = SmolVLAPolicy.from_pretrained(str(checkpoint)).to(device).eval()
+        if tuple(self.model.config.input_features["observation.state"].shape) != (
+            len(STATE_NAMES),
+        ):
+            raise ValueError("checkpoint state layout differs from this training adapter")
         self.preprocess, self.postprocess = make_pre_post_processors(
             self.model.config,
             pretrained_path=str(checkpoint),
@@ -40,16 +44,25 @@ class SmolPolicy:
 
     def infer(self, request: PredictRequest) -> ActionChunk:
         observation = request.observation
-        if observation.imu is None or "head" not in observation.images:
-            raise ValueError("SmolPolicy requires IMU and a head-camera observation")
+        if (
+            observation.imu is None
+            or observation.velocities is None
+            or "head" not in observation.images
+        ):
+            raise ValueError(
+                "SmolPolicy requires joint velocities, IMU and a head-camera observation"
+            )
         q = np.asarray(observation.imu.quat, dtype=np.float32)
         norm = np.linalg.norm(q)
         if norm < 1e-6:
             raise ValueError("invalid orientation quaternion")
         w, x, y, z = q / norm
         gravity = np.array([2 * (w * y - x * z), -2 * (y * z + w * x), 2 * (x * x + y * y) - 1])
-        state = np.concatenate([observation.positions, observation.imu.gyro, gravity]).astype(
-            np.float32
+        state = state_vector(
+            np.asarray(observation.positions),
+            np.asarray(observation.imu.gyro),
+            gravity,
+            np.asarray(observation.velocities),
         )
         image = np.asarray(
             Image.open(
