@@ -17,6 +17,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        nargs="+",
+        help="Train on selected native episode indices; normalization uses the full dataset stats",
+    )
     parser.add_argument("--model", default="lerobot/smolvla_base")
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -64,6 +70,7 @@ def main() -> None:
             dataset=DatasetConfig(
                 repo_id="duckmind/microduck-train",
                 root=str(args.dataset.resolve()),
+                episodes=args.episodes,
                 video_backend="pyav",
             ),
             policy=policy,
