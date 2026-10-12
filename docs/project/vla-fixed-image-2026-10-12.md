@@ -86,8 +86,9 @@ No expert takeover, rule-based action dispatch, threshold change or real hardwar
 ## Run identity and current status
 
 Launched on the amd devbox on 2026-10-12 at approximately 06:36 UTC (14:36 Asia/Shanghai),
-launcher PID233824. Preparation is complete; the bounded script is running. No final comparison
-result is available at launch.
+launcher PID233824. Completed at 06:59:56 UTC (14:59:56 Asia/Shanghai), exit0.
+Both 1,000-step final checkpoints were saved; all 2,004 authorized updates are accounted for.
+The source hash check passed. No additional training was launched.
 
 Artifacts under `training/artifacts/`:
 
@@ -101,3 +102,78 @@ Artifacts under `training/artifacts/`:
 The phase order is smoke/raw, smoke/fixed, both zero controls, raw training/evaluation, fixed
 training/evaluation, then source-hash verification. Do not duplicate a job or modify running
 scripts. Completion must include independent result auditing before claiming improvement.
+
+
+## Completed comparison and decision
+
+The fixed-image recipe made repeated evaluation exactly reproducible in this run, but did not
+improve strict walking success. This supports using it as an early motion-debugging baseline,
+while retaining the better-scoring raw checkpoint. Neither is promoted as a reliable replacement
+for the expert or as a real-time robotd policy.
+
+| Source | Strict success ↑ | Fresh initial states ↑ | Stable throughout ↑ | Equal repeat outcomes ↑ | Exact repeat trajectories ↑ |
+|---|---:|---:|---:|---:|---:|
+| [Raw final](../../training/artifacts/diagnostic-v13-fixed-image/raw/report.json) | **18/20** | **15/16** | **18/20** | 8/10 pairs | 0/10 pairs |
+| [Fixed final](../../training/artifacts/diagnostic-v13-fixed-image/fixed/report.json) | 14/20 | 12/16 | 14/20 | **10/10 pairs** | **10/10 pairs** |
+
+The fresh column covers four initial-state seeds, each evaluated with two noise seeds and two
+repeats. Known392 contributes3/4 raw and2/4 fixed. These are small perturbations of the same
+Microduck body on flat ground, not morphology or hardware variation. There is only one training
+seed and one task phrase; the table does not establish general superiority of camera conditioning.
+
+Zero-update controls use a different, smaller known-state matrix and must be kept separate:
+
+| Source | Strict success ↑ | Twelve training chunks MSE rad² ↓ |
+|---|---:|---:|
+| [Raw zero](../../training/artifacts/diagnostic-v13-fixed-image/zero-raw/report.json) | **2/4** | **0.000464750** |
+| [Fixed zero](../../training/artifacts/diagnostic-v13-fixed-image/zero-fixed/report.json) | 0/4 | 0.001194787 |
+
+Final offline MSE is0.000435761 raw and0.000523839 fixed, versus persistence0.094813421 on the
+same twelve training chunks. These are fit diagnostics, not held-out predictive performance.
+Native end loss is0.049 raw/0.054 fixed; the lower offline error alone does not certify walking.
+
+### What repeated failures explain
+
+All ten fixed body/noise pairs have exactly equal saved effective input state, previous target,
+black image, predicted chunks and physical trajectories across repeats. Three pairs fail both times:
+
+| Initial-state seed | Inference-noise seed | Executed ticks, each repeat | Failure |
+|---|---|---:|---|
+| 392 | 390 | 84 | unstable before200 ticks |
+| 410 | 392 | 146 | unstable before200 ticks |
+| 412 | 390 | 195 | unstable before200 ticks |
+
+Every failure violates only the completion/stability checks; heading and measured progress do not
+explain these particular rejections. Raw failures occur only on repeat1:392/392 at147 ticks and
+412/392 at119 ticks. All raw repeated trajectories differ eventually. The first effective
+image/prediction difference precedes physical-state divergence; in three pairs the first camera
+image already differs by one RGB level, yielding initial chunk max differences0.00128–0.00195rad.
+This local evidence is consistent with image-sensitive predictions amplifying into trajectory
+differences. It does not prove all past walking failures were caused by pixels.
+
+Fixed conditioning removes that observed repeat variability here, but reproducible falls remain.
+The next useful experiment would target these deterministic failure states, or examine the first
+prediction error leading to each fall, using the fixed-image model as a reproducible baseline.
+It is not sufficient to add paraphrases or assume more training steps will resolve balance.
+This report recommends that direction; it does not launch another experiment or allocate updates.
+
+### Timing and audit limits
+
+Formal inference took a median0.24866s raw and0.25000s fixed. All1,506 formal requests exceeded
+0.2s, longer than both the0.1s executed prefix and the0.2s predicted horizon. Keeping a black image
+in the existing VLM does not remove its compute. Physics paused during inference; this is not
+real-time deployment evidence. Zero/raw, zero/fixed and final raw/fixed evaluation stages took
+72.8s,42.4s,260.6s and248.7s respectively; evaluation peak CUDA allocation was1,262,706,688bytes.
+Native logged training memory was2.33GB for both arms.
+
+Independent CPU review passed83 preflight checks and856 final checks. It recomputed all strict
+quality fields from complete traces, matched executed actions to saved chunks, checked effective
+processors, numerical data, hashes and all fixed input images, and confirmed final native configs
+differ only in dataset root/output directory. Saved optimizer states sum to2,004 updates. No
+reviewer training or GPU inference was used. Failure evidence, checkpoints and original data remain.
+
+Audit files in `training/artifacts/diagnostic-v13-fixed-image/` include
+`v13-independent-preflight.md`, `v13-independent-preflight-checks.json`,
+`v13-independent-results.json`, `v13-independent-results.md`, `v13-audit-form.md`, and
+`v13-training-metrics.json`/`.md`; `run.md` links the result audit. The experiment is complete;
+automatic follow-up is paused after delivery rather than silently starting another training run.
