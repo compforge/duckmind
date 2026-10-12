@@ -119,10 +119,73 @@ All artifacts live under `training/artifacts/`:
 - `diagnostic-v14-correction/recovery/`: report, all nine attempts, full failed-prefix replays and
   teacher controls; `run.md` records stage decisions.
 - `diagnostic-v14-correction/data-audit.json`, `dataset-v14-union/`, `smolvla-v14-zero/`.
-- Planned `smolvla-v14-{control,mixed}[-smoke]` and
+- `smolvla-v14-{control,mixed}[-smoke]` and
   `diagnostic-v14-correction/{zero,control,mixed,smoke-control,smoke-mixed}/`.
 
-Collection and preparation are complete; independent preflight passed74 checks plus full video decoding.
-The bounded launcher PID673267 has started on the amd devbox. Training stage and actual checkpoints must be checked
-against `run-v14-pair.stage/log/exit-code` and live processes, never inferred from this design.
-No robotd/production Policy source or blog content is changed by this experiment.
+The launcher completed at 2026-10-12 08:35:17 UTC with exit code 0. Actual optimizer
+steps were 2 + 2 + 1,000 + 1,000 = 2,004; no further training was started. All input/source
+hash checks passed. Models, datasets and failed trajectories are preserved. Disk free space
+was 5.4 GiB after completion; another training round needs a storage plan.
+
+## Results
+
+**The correction mixture improved four-second performance in this run but did not improve
+strict eight-second walking.** All three phases use the same union normalization and evaluation
+matrix. Four-second results are prefixes of the same eighteen rollouts, not extra samples.
+
+| Phase | Known 4s | Fresh 4s | All 4s | Known 8s | Fresh 8s | All 8s | Stable full 8s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Zero updates | 5/10 | 3/8 | 8/18 | 2/10 | 3/8 | 5/18 | 5/18 |
+| Original data, 1,000 updates | 6/10 | 6/8 | 12/18 | 4/10 | 1/8 | 5/18 | 9/18 |
+| Correction mixture, 1,000 updates | 8/10 | 7/8 | 15/18 | 3/10 | 1/8 | 4/18 | 10/18 |
+
+Mixed versus control improves six four-second cells and regresses three. At eight seconds,
+it improves two and regresses three. Among the ten mixed rollouts that stay stable for the full
+eight seconds, six fail only the original-heading criterion. Eight other mixed rollouts become
+unstable. Stable completion therefore cannot replace task success.
+
+The three exact collection failure conditions all pass four seconds after mixed training,
+compared with one for control and two for zero. Only one of these three passes eight seconds
+in either trained arm. This supports local short-horizon improvement, not durable recovery.
+
+Normalization itself changes behavior: zero has the same weight SHA as v13 fixed, but the new
+union processors change the ten matched known cells from 7/10 to 5/10 at four seconds. Two old
+failures become successes and four old successes fail before any optimizer update. Consequently
+repairs relative to v13 alone cannot be credited to correction training.
+
+On twelve original training chunks, action MSE is 0.0005523 rad² for zero, 0.0005226 for control
+and 0.0006029 for mixed; the persistence floor is 0.0948134. This fit diagnostic is neither a
+held-out score nor a surrogate for closed-loop success. Formal inference medians are 247.5,
+246.5 and 251.8 ms respectively; all 3,096 calls exceed the 200 ms predicted chunk duration
+(and the 100 ms executed prefix). Evaluation pauses physics and does not demonstrate real-time
+control, language generalization or visual behavior.
+
+Independent CPU audits cover collection (344 checks), preflight (74), smokes (52), zero (243),
+control (285), and final mixed/integrity review (516). Effective state/action processors match
+union statistics; formal configurations differ only in episode selection and output directory.
+All actual model images are black and initial physical state/prior are identical across phases.
+Raw evidence and the complete ML-debug form are in
+`training/artifacts/diagnostic-v14-correction/final-audit.md`, with machine-readable independent
+audits and the per-phase reports. No production source or blog content changed.
+
+## Next research decision
+
+Existing traces separate two problems: six mixed rollouts exceed the 0.5 rad heading gate while
+remaining stable to eight seconds; among the eight unstable rollouts, six exceed that gate before
+instability and two fall without exceeding it. These timings are in `heading-timeline.json`.
+Temporal ordering does not show that heading drift causes the falls.
+
+The current 51-dimensional input contains joint position/velocity, angular velocity, projected
+gravity and the previous target. It does not directly encode heading relative to the task's initial
+direction. With fixed images and no accumulated observation history, instantaneous angular velocity
+can reveal turning but cannot directly tell the policy how far it has already turned. This is a
+concrete observability hypothesis, not a proven explanation for every failure.
+
+Before adding more data, the next proposed comparison should distinguish suppressing instantaneous
+turn rate from correcting accumulated heading error. Audit the task frame and expert labels first;
+then consider a measured/estimated task-relative heading or temporal state representation, with a
+separate state contract and paired evaluation. Do not weaken the existing success gate to hide drift.
+This round has one optimizer seed and four fresh initial-state conditions. Mixture changes original
+sample exposure, so the result estimates this bounded recipe and cannot establish the general
+value or futility of correction learning. The allocated run is complete; automatic follow-up is
+paused and no new experiment is queued.
