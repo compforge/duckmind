@@ -103,13 +103,10 @@ The launcher started on2026-10-12 at05:58UTC, PID4127004. Runtime files are in t
 - `smolvla-v12-{control,mixed}` native checkpoints, their resolved configs and optimizer state.
 - `smolvla-v12-zero`, retaining the initial model by hardlink and replacing only processors.
 
-At this document revision, both two-update smoke runs and their ten-tick physical execution checks
-completed. Effective processor equality passed; the pipeline is evaluating the zero baseline.
-No formal-training or full physical-success result is claimed. Check the live stage/exit status before
-continuing; do not launch a duplicate or change running scripts. The independent CPU preflight also verified actual native sampler indices, all numerical rows and
-both source-video hashes; its report is `diagnostic-v12-pair/independent-preflight.md`. Final results
-and the result-level ml-debug audit will extend this record. Local training checks: Ruff format/lint passed; pytest9passed,
-2skipped. Skipped native/GPU coverage is supplied by the actual remote smoke, not these CPU tests.
+Data preparation, both smoke stages, formal training, physical acceptance and targeted no-training
+repeats are complete. Original pipeline exit0; results and interpretation are below. Local training
+Ruff format/lint and pytest9passed/2skipped checks passed. The real remote smoke supplies native/GPU
+coverage absent from those CPU checks. Independent reports remain in the artifact directory.
 
 ## Research decision and competing explanations
 
@@ -127,3 +124,138 @@ Three ways an apparently positive result could mislead: union normalization acco
 (check zero); extra exposure/weighting accounts for it (fixed-update conditional interpretation);
 known-body memorization accounts for it (report fresh4-body matrix separately). Renderer variability
 and a single optimizer seed limit small differences even when those controls pass.
+
+## Completed results
+
+The pipeline completed at2026-10-12 06:18:45UTC with exit0. It used exactly2,004 optimizer updates:
+two discarded two-update smokes and two1,000-update formal arms. All declared source checks passed
+at completion. **This fixed-budget correction mixture has not demonstrated a reproducible strict-forward gain.**
+It learned the sampled correction targets better offline, while its first fresh-body score was lower.
+The targeted repeat below changes several physical outcomes, preventing a reliable ranking from the
+initial two-trial difference.
+
+| Model | Known bodies: strict ↑ | Fresh bodies: strict ↑ | All trials: strict ↑ | Full-horizon stable ↑ |
+|---|---:|---:|---:|---:|
+| Original-data control |3/6|5/8|8/14|8/14|
+| Original + recovery mixture |2/6|4/8|6/14|9/14|
+| Zero updates, union processors |0/6|0/8|0/14|0/14|
+
+Fresh acceptance means four body resets with two diffusion seeds each, not eight independent bodies.
+This is one optimizer seed and one language phrase, so the two-trial difference is descriptive, not
+statistically established general harm from correction data. Control/mixed success sets differ:
+mixed rescues400/noise390 and402/noise392 but loses390/noise392,400/noise392,401/noise390 and402/noise390.
+The normalization-zero result is not a rerun of v8's original effective policy: union statistics change
+its input/output mapping. Both trained arms recover some behavior relative to that shared zero.
+
+All six control failures lose balance. Mixed has five balance failures and three stable directional
+failures. In the targeted known condition392/noise390, mixed completes200ticks but ends with yaw1.19953rad
+and fails the original-heading gate; control loses balance at127ticks. Mixed390/noise392 completes but
+reaches yaw1.83332rad and0.31034m lateral displacement, also failing tail progress. Mixed403/noise392
+completes with yaw0.96082rad and0.20698m lateral displacement. Extra survival is not successful straight
+walking; no thresholds were relaxed.
+
+### Offline fitting and runtime
+
+These twelve chunks are sampled from training episodes, six original and six recovery. They are fit
+diagnostics only. The persistence baseline repeats the actual prior target across H10.
+
+| Model | Original6 chunks MSE ↓, rad² | Recovery6 chunks MSE ↓, rad² | Combined12 MSE ↓, rad² |
+|---|---:|---:|---:|
+| Mixture |0.000619681|0.008778543|0.004699112|
+| Zero, union processors |0.000551201|0.015287043|0.007919122|
+| Control |0.000551968|0.015821645|0.008186806|
+| Persistence baseline |0.086800896|0.128471419|0.107636161|
+
+Recovery-sample MSE is about44.5% lower for mixture versus control; original-sample MSE is about12.3%
+higher. These few samples are consistent with a fitting tradeoff, not proof of its causal contribution
+to closed-loop outcomes. The changed data mixture and reduced original-example exposure remain coupled.
+
+Both formal arms have100 logged metric rows. Control starts at step10 loss0.082 and finishes at0.051;
+mixture starts0.173 and finishes0.072. Final gradient norms are0.746/0.991 and LR2.5e-6. During warmup,
+control's largest logged loss/gradient is0.116/1.592 at step120; mixture's maximum loss0.207 is at step70,
+and its maximum gradient2.173 at step10. No NaN, OOM, disk error or traceback appears in the completed
+training log. The groups sample different distributions, so their training losses are not an isolated
+quality comparison. Module-wise gradients were not recorded.
+
+Zero/control/mixed physical-evaluation inference median is0.24154/0.24929/0.25450s; p95 is
+0.27813/0.28309/0.29035s. Every one of1,279 rollout inference calls exceeds200ms, while E5 covers100ms
+and H10 covers200ms. Physics was paused; none of these models is validated for sustained real-time
+control. Evaluation durations including loading/fit/rendering are109.19/177.05/188.74s, with peak PyTorch
+allocated memory1,262,706,688bytes each. Native training logs report2.33GB allocated memory; this is not
+whole-process or device peak memory. Each formal1,000-step training loop takes about4m24s.
+
+## ml-debug result audit
+
+The complete normalized log has3,239 lines and251,804 UTF-8 bytes. It retains resolved configs, four
+native training stages, physical failures and final input checks. `result-summary.json` is derived from
+raw reports/fit tensors; it is not a replacement for them. The independently verified initial audit
+checks and the final result audit are stored beside `run.md`.
+
+| Form item | Observed evidence and limitations |
+|---|---|
+| SHOULD budget/config | Four completed stages:2+2+1000+1000 updates, native batch8/H10/seed42, resumeFalse. Formal configs differ only output directory and selected episodes. |
+| SHOULD source data | All4000 numerical frames match source, native samplers select2000/4000 rows, source MP4 hashes preserved, shared float64 statistics and H10 boundary masks checked. |
+| SHOULD actual processors | Zero/smoke/final JSON-referenced state/action mean/std tensors equal union stats exactly; original v8 bytes equal zero model. |
+| SHOULD physical inputs/execution | Actual input state/prior/physics align with Trace and applied prediction prefixes;20ms ticks and strict gates independently recomputed. Matched initial physics/state/prior are exact; renderer variation is explicitly retained. |
+| Initial/baseline | Zero weights with union processors fail14/14. This controls normalization for the arms, not original-normalization v8 capability. |
+| Dummy | Same12-chunk persistence MSE0.107636 versus0.007919/0.008187/0.004699. No random/shuffled training or persistence physical baseline; standing still fails progress gates by definition. |
+| Validation and transfer | Fresh strict control5/8,mixture4/8 over four bodies; known3/6 versus2/6. Offline12 chunks are training samples, not validation. One optimizer seed, no language/visual-grounding claim. |
+| LR/worst step | Warmup100 then decay to2.5e-6; finite loss and total gradient norms. Higher mixed warmup losses may reflect harder/different samples; per-module and same-batch loss are unavailable. |
+| Full sample | `mixed/392-390-inputs.npz` and matching trace contain actual task-conditioned51D inputs,H10x15 predictions and200applied ticks; stable outcome fails yaw1.19953rad. |
+| Surprising result / second cause | Better recovery-target fit and more stable finishes9vs8 coexist with lower strict success6vs8. Original-heading/lateral/tail gates explain the distinction. More stable finishes could reflect a different gait, not learned direction recovery. |
+| Missing evidence | Optimizer repetitions, original-normalization matched baseline on all new states, broader recovery origins, more phrases, per-module gradients and real-time inference remain absent. |
+| Working diagnoses | Subjective next-investigation priorities: correlated mixture/exposure35%, conditioning and recoverability25%, visual/sampling sensitivity20%, training bug5%, evaluation bug5%, unknown10%. These are not probabilities inferred statistically. |
+| Evidence for/against | Recovery fitting improves while original fitting slightly worsens; correction origins sharebody392. But improvement on two new cells argues against universal mixture failure. Exact data/processor/execution checks constrain pipeline bugs; they do not prove observation sufficiency or identify a physical mechanism. |
+| Cheapest distinction | Reproduce targeted392 failures without updates. A future bounded comparison could vary recovery sampling while preserving original examples, or diversify recovery origins; do not combine both changes and claim one cause. |
+| Independent review | Source-first CPU reviewer recomputes gates, temporal alignment, all hashes and effective processors; final report and checks retained. |
+| Cost/shorter loop | Whole pipeline20m45s; formal training~4m24s each, inference~250ms/request. Smaller diagnostic matrices shorten investigations but do not replace acceptance. |
+
+Three ways to overclaim: a single-task policy can ignore language and still score well; correlated reset/
+noise trials inflate apparent sample size; stable but turning trajectories can appear successful in a
+video. Single-phrase scope, explicit grouping and strict per-tick direction gates keep those separate.
+A negative result applies to this50% recovery mixture, shared-normalization warm start and1,000-update
+budget. It does not rule out correction learning, lower recovery weights, broader data, a different
+history representation or a different learner.
+
+The experiment budget is consumed. No new training is queued. The initial matrix favors control, but the observed repeat variability prevents promoting it as
+a reliably superior model. Neither is an expert replacement or a real-time deployment candidate.
+Retain both checkpoints and all failures. The next design decision should first address repeatability and closed-loop sensitivity, then the
+fit/control tradeoff and narrowly sourced recovery data before spending another training budget.
+
+## Targeted no-training repeat
+
+After original completion and exit0, archive the exact executed script as
+`run-v12-pair.completed.py`, then add only an optional body-seed selection argument to the same evaluator.
+The archived script matches its original manifest SHA. `run-v12-repeat.log/.exit-code` records four more
+rollouts: both trained checkpoints, known body392, noise390/392. No optimizer update, model, processor,
+threshold or production-source change is involved. These are repeats, not four new held-out conditions,
+and are not pooled into the original14-trial denominators.
+
+| Model / body392 noise | Original strict / ticks | Repeat strict / ticks |
+|---|---|---|
+| Control /390 |Fail /127|Fail /197|
+| Control /392 |Fail /134|Pass /200|
+| Mixed /390 |Fail, stable heading /200|Pass /200|
+| Mixed /392 |Fail /149|Pass /200|
+
+The repeated subset is control1/2 versus mixed2/2, compared with0/2 each originally. Each checkpoint's
+12-chunk fixed-input fit metric remains exactly equal. Initial physics/state/prior also remain exact.
+Actual model input images vary slightly: mixed390 first-request image differs in nine RGB channels by
+one intensity level; mixed392 differs in one channel by one level. Their first predicted-chunk RMSEs
+are0.000530985/0.000517193rad, maximum absolute difference0.0023590/0.0022158rad.
+
+Both control first requests are pixel/state/prior/chunk-identical. The first prediction differences occur
+later: control390 at tick10 (three image channels differ by one; chunk maximum0.0026898rad) and control392
+at tick15 (one image channel differs by one; chunk maximum0.0036775rad), while state/prior still match.
+This is descriptive evidence that visual/numerical sensitivity precedes some divergence, consistent with
+v8/v9; it is not a new intervention proving that those particular pixels caused every physical failure.
+
+The independent audit passed804 original checks plus300 repeat checks, including the198 unchanged
+simulation/BAM/teacher witnesses. Full reports are `independent-results.md`, `independent-checks.json`,
+`repeat-checks.json` and `repeat-first-requests.json`. Original and repeated failures remain preserved.
+
+**Decision after repeat:** there is no reproducible correction-mixture benefit established here, and
+there is also insufficient evidence to rank control as generally superior. The next useful experiment
+should test robustness to observation variation (for example, a controlled training-time visual
+augmentation comparison) and repeated physical acceptance, before interpreting small one-pass score
+differences. Any new training needs its own bounded plan; none is launched by this run.
