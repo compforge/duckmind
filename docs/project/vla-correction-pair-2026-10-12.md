@@ -94,7 +94,7 @@ real-time deployment. Record latency relative to100ms execution and200ms predict
 
 ## Evidence and status
 
-The launcher started on2026-10-12 at13:58UTC, PID4127004. Runtime files are in the remote worktree's
+The launcher started on2026-10-12 at05:58UTC, PID4127004. Runtime files are in the remote worktree's
 `training/artifacts/`:
 
 - `run-v12-pair.py`, `.sh`, `.log`, `.stage`, `.exit-code`, `.inputs.sha256`.
@@ -103,10 +103,12 @@ The launcher started on2026-10-12 at13:58UTC, PID4127004. Runtime files are in t
 - `smolvla-v12-{control,mixed}` native checkpoints, their resolved configs and optimizer state.
 - `smolvla-v12-zero`, retaining the initial model by hardlink and replacing only processors.
 
-At this document revision, data preparation/audit is complete and the pipeline is in smoke training.
-No formal-training or physical-success result is claimed. Check the live stage/exit status before
-continuing; do not launch a duplicate or change running scripts. Final results and the independent
-ml-debug audit will extend this record. Local training checks: Ruff format/lint passed; pytest9passed,
+At this document revision, both two-update smoke runs and their ten-tick physical execution checks
+completed. Effective processor equality passed; the pipeline is evaluating the zero baseline.
+No formal-training or full physical-success result is claimed. Check the live stage/exit status before
+continuing; do not launch a duplicate or change running scripts. The independent CPU preflight also verified actual native sampler indices, all numerical rows and
+both source-video hashes; its report is `diagnostic-v12-pair/independent-preflight.md`. Final results
+and the result-level ml-debug audit will extend this record. Local training checks: Ruff format/lint passed; pytest9passed,
 2skipped. Skipped native/GPU coverage is supplied by the actual remote smoke, not these CPU tests.
 
 ## Research decision and competing explanations
