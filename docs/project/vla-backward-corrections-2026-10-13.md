@@ -50,3 +50,17 @@ zero只替换union统计、0更新；control/mixed各自训练后采用相同22c
 采集/准备先审计，再唯一启动训练。任何门禁失败保留证据，不降门槛、不自动增加预算。
 工件在devbox /srv/duckmind-training/v21-owner/run；入口run-backward-curriculum.sh。
 结果交付后暂停自动跟进，不自动追加下一轮或合并PR。
+
+## 采集进展
+
+prepare唯一进程1852532已完成6候选与5个教师正控，正在原生数据转换。
+5个纠偏窗口通过，共1000帧；700prefix20全程稳定但净后退和尾部后退未达标，
+保留原始轨迹、不纳入训练。5个teacher-only正控均通过，完整学生失败回放与接管点物理精确一致。
+预计union134eps/31400frames，control10eps/2000frames，mixed15eps/3000frames。
+实际以prepare.exit-code=0、data-audit和独立审计为准，当前尚未正式训练。
+
+代码d57ecd376e2d712f5d2c62f3db8c666193f2c4a9已推送并核验远端一致，训练组件
+make fix/lint/test通过（17passed、2skipped）。devloop提交推送后仍因旧action-chunks路径的
+postcheck退出1，不能称整个工具全成功；PR5实验描述已更新，未自动合并。
+独立审计重点是非连续episode选择的全局/本地索引映射、实际future-action/padding、
+两组fullunion归一化以及纠偏raw到dataset时序。审计通过才可唯一启动2004更新流程。
