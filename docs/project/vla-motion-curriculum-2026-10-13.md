@@ -129,3 +129,29 @@ ml-debug修订：当前错误与训练代码/优化器无关（0更新）；是�
 竞争解释仍包括teacher局部吸引域、命令幅度敏感、初态扰动影响，尚未区分；
 对照701原地稳定与700实际后退足以拒绝无效停止数据，不足以判定老师网络内部原因。
 最小修复是保留拒绝证据并继续检查剩余候选，不用放宽门限制造成功。
+
+## 准备完成与启动
+
+第二次prepare退出0。最终129 episodes / 30,400 frames：旧80/20,600完全保留，
+新候选50条中49条/9,800帧被接受。独立CPU审计8项全通过，远端报告
+`/srv/duckmind-training/v19-owner/independent-preflight-audit.json`。
+审计逐帧比对state/action/text/previous_target；独立重算258组episode与2组global数值统计，
+校验zero的6个有效processor张量与相同初始权重，解码30,400黑图帧，核对6个数据文件、
+21个源文件、teacher/upstream SHA。25组moving初态精确对齐各停止/继续/对照首帧。
+
+教师新任务校准每类3/3通过；继续前后走正例各3/3，继续和保持target误判停止均0/6。
+旧forward教师12秒严格0/3、4秒3/3：12秒均稳定且前进，但heading失败，末yaw约-0.68rad。
+这界定了旧教师长时直线能力，不能包装为新任务校准失败，也不降低原门限。
+
+2026-10-13 06:39 UTC（北京时间14:39）启动唯一train-evaluate，PID621889。
+实际run.stage=smoke-train，入口源码commit13a1afdf69f6aa62fb569db6d9a869a750b13ad4。
+先2步smoke及13场景各10tick，再baseline/zero；通过后自动4000正式更新、final和hashcheck。
+目前是流程已启动，不是正式训练已完成或新动作已学会。native日志和run.stage/pid/exit-code
+位于工件run下，模型/data/trace全保留，自动跟进已恢复。
+
+ml-debug阶段证据：prepare日志266,200字节、退出0；三类SHOULD（真moving、train-only统计、
+黑图/时序）已经上述独立检查，预算/身体模型结果仍待后续。完整教师样本可检查
+`run/teacher/train-700-backward.npz`与report对应row；无效样本保留在
+`run/teacher/train-701-stop_backward-preparation-failed.json`。prepare没有优化、梯度和lr，
+这些项目不适用；smoke/正式训练需读取各自原生日志。准备/审计为CPU与渲染工作，未测峰值显存，
+不得补造使用量。独立审查未发现剩余启动阻断，仍不能由教师成功推出学生会学会。
