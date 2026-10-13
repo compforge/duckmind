@@ -12,6 +12,14 @@ import onnxruntime as ort
 from duckmind_training.contract import IMAGE_SIZE, JOINT_NAMES, Task, state_vector, wire_positions
 
 
+class PreparationError(ValueError):
+    """An invalid physical start, with evidence retained before origin reset."""
+
+    def __init__(self, message: str, evidence: dict):
+        super().__init__(message)
+        self.evidence = evidence
+
+
 class Simulation:
     def __init__(self, upstream: Path, teacher: Path):
         spec = importlib.util.spec_from_file_location(
@@ -118,12 +126,19 @@ class Simulation:
             if task.initial_twist[0] and (
                 signed_progress <= 0.03 or not all(m["stable"] for m in tail)
             ):
-                raise ValueError(
-                    f"expert did not establish the requested moving direction: {task.name}"
+                raise PreparationError(
+                    f"moving start failed: task={task.name} seed={seed} "
+                    f"signed_progress={signed_progress:.6f}m "
+                    f"stable_tail={all(m['stable'] for m in tail)}",
+                    preparation,
                 )
             # Stop examples start from an actually moving body, never a stationary reset.
             if not self.metrics()["stable"] or np.mean(self.tail_speeds) < 0.06:
-                raise ValueError(f"expert cannot prepare moving start for {task.name}")
+                raise PreparationError(
+                    f"moving start too slow or unstable: task={task.name} seed={seed} "
+                    f"speed={np.mean(self.tail_speeds):.6f}m/s",
+                    preparation,
+                )
         self.mark_origin()
         return preparation
 

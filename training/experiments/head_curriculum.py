@@ -35,7 +35,7 @@ from duckmind_training.correction_quality import (
 from duckmind_training.corrections import Trace, expert_rollout
 from duckmind_training.dataset import precise_numeric_stats
 from duckmind_training.learned import SmolPolicy
-from duckmind_training.simulation import Simulation
+from duckmind_training.simulation import PreparationError, Simulation
 
 
 @dataclass(frozen=True)
@@ -317,7 +317,27 @@ def prepare(args: argparse.Namespace) -> None:
                 for name in course.tasks if split == "calibration" else course.new_tasks:
                     task = SELECTED[name] if split == "calibration" else SELECTED[name].sample(seed)
                     steps = 600 if name == "forward" else 200
-                    preparation = sim.prepare(task, seed)
+                    identity = f"{split}-{seed}-{name}"
+                    try:
+                        preparation = sim.prepare(task, seed)
+                    except PreparationError as error:
+                        write(raw / f"{identity}-preparation-failed.json", error.evidence)
+                        row = {
+                            "id": identity,
+                            "seed": seed,
+                            "name": name,
+                            "split": split,
+                            "steps": 0,
+                            "command": asdict(task),
+                            "quality": {"accepted": False, "reason": "invalid_initial_state"},
+                            "preparation_error": str(error),
+                        }
+                        report["episodes" if split == "train" else "evaluation"].append(row)
+                        write(raw / "report.json", report)
+                        note(root, f"Teacher {identity}: {error}")
+                        if split != "train":
+                            raise
+                        continue
                     initial_witness(root, sim, seed, task, preparation)
                     sim.command(task)
                     trace = expert_rollout(sim, steps)
@@ -557,6 +577,7 @@ def evaluate(
         "phase": phase,
         "stage": "started",
         "trials": [],
+        "invalid_starts": [],
         "physics_paused": True,
         "model_sha256": sha256(checkpoint / "model.safetensors"),
         "processors": processor_audit(checkpoint, reference),
@@ -611,7 +632,28 @@ def evaluate(
                     if smoke
                     else [("trained", task.texts[0]), ("unseen", course.unseen[name])]
                 ):
-                    preparation = sim.prepare(task, seed)
+                    identity = f"{seed}-{name}-{language}"
+                    try:
+                        preparation = sim.prepare(task, seed)
+                    except PreparationError as error:
+                        write(out / f"{identity}-preparation-failed.json", error.evidence)
+                        report["invalid_starts"].append(
+                            {
+                                "id": identity,
+                                "body": seed,
+                                "task": name,
+                                "language": language,
+                                "text": text,
+                                "reason": "invalid_initial_state",
+                                "error": str(error),
+                                "student_predictions": 0,
+                            }
+                        )
+                        write(out / "report.json", report)
+                        note(root, f"{phase} {identity}: invalid_initial_state: {error}")
+                        if smoke:
+                            raise
+                        continue
                     initial_witness(root, sim, seed, task, preparation)
                     # Do not set teacher command: learned text is the sole task input.
                     trace = Trace()
@@ -689,6 +731,9 @@ def evaluate(
                         f"{phase} {identity}: ticks={row['ticks']} "
                         f"accepted={quality['accepted']} stable={row['stable']}",
                     )
+        report["scheduled_cases"] = len(course.tasks) * (1 if smoke else len(course.eval_seeds) * 2)
+        report["eligible_cases"] = len(report["trials"])
+        assert report["scheduled_cases"] == len(report["trials"]) + len(report["invalid_starts"])
         if smoke:
             assert len(report["trials"]) == len(course.tasks)
             assert all(r["ticks"] == 10 and r["reason"] == "completed" for r in report["trials"]), (
@@ -820,15 +865,59 @@ def calibrate_gaze(args: argparse.Namespace) -> None:
         sim.close()
 
 
+def check_starts(args: argparse.Namespace) -> None:
+    """Teacher-only preflight; no student predictions or optimizer updates."""
+    path = args.root.parent / "start-check.json"
+    assert not path.exists()
+    course = args.course
+    report = {"stage": "started", "source_files": source_witness(), "cases": []}
+    sim = Simulation(args.upstream, args.teacher)
+    try:
+        for split, seeds in (
+            ("train", course.train_seeds),
+            ("calibration", course.calibration_seeds),
+            ("evaluation", course.eval_seeds),
+        ):
+            for seed in seeds:
+                for name in ("stop_forward", "stop_backward"):
+                    try:
+                        evidence = sim.prepare(SELECTED[name], seed)
+                        error = None
+                    except PreparationError as failure:
+                        evidence, error = failure.evidence, str(failure)
+                    report["cases"].append(
+                        {
+                            "split": split,
+                            "seed": seed,
+                            "task": name,
+                            "error": error,
+                            "preparation": evidence,
+                        }
+                    )
+                    write(path, report)
+                    print(f"Start {split}/{seed}/{name}: {error or 'valid'}", flush=True)
+        report["stage"] = "complete"
+        write(path, report)
+    finally:
+        sim.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("prepare", "train-evaluate", "calibrate-gaze"))
+    parser.add_argument(
+        "stage", choices=("prepare", "train-evaluate", "calibrate-gaze", "check-starts")
+    )
     for name in ("root", "replay", "initial", "upstream", "teacher"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--course", choices=tuple(COURSES), default="heads")
     args = parser.parse_args()
     args.course = COURSES[args.course]
-    {"prepare": prepare, "train-evaluate": run, "calibrate-gaze": calibrate_gaze}[args.stage](args)
+    {
+        "prepare": prepare,
+        "train-evaluate": run,
+        "calibrate-gaze": calibrate_gaze,
+        "check-starts": check_starts,
+    }[args.stage](args)
 
 
 if __name__ == "__main__":
