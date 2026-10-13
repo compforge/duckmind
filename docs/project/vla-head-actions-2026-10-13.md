@@ -91,25 +91,40 @@ baseline 使用 v17 原统计；zero 使用相同权重与新训练统计；fina
 因此在学生验收前锁定上文的文本任务判据，并保留原四关节误差。
 第二次完整数据和校准结果保留于`prepare-attempt2`，不作为一次成功prepare报告。
 
-第三次prepare重新采集，日志`prepare3.log`。当前正式训练未开始。
-代码规范通过，CPU 测试 13 passed / 2 skipped。
-完整 teacher/data/smoke 证据形成后再记录是否允许正式训练。
+第三次prepare已完成，完整日志`prepare3.log`共1767行，无新异常。
+独立审计`independent-preflight-audit.json`核验68份raw、80episodes/20600frames，
+旧10600帧及文本不变、新10000帧逐帧对应raw、eval和新措辞排除，
+episode/global float64统计与6个zero processor张量相等，权重/数据SHA一致，
+80个episode末帧的原生H10padding及黑图均通过。
+
+教师五类任务训练50/50、独立初态15/15通过；错误目标误通过0/60。
+前进教师4秒strict3/3，12秒strict0/3，仅heading失败，三条均稳定600ticks。
+这再次说明不能把长时平衡与严格直线行走混为一谈。
+
+已启动launcher PID4163605（先smoke，随后baseline/zero/正式2000/final），
+实时状态见`run.pid`、`run.stage`、`run.log`、`run.exit-code`。源代码提交`eed6fd9`，
+新PR为 https://github.com/compforge/duckmind/pull/5 。学生新动作结果尚待验收。
+代码规范通过，CPU测试13 passed / 2 skipped；这不代替GPU smoke和闭环任务评分。
+依赖记录见`runtime-provenance.json`，输入源哈希见`run-source-sha256.json`。
+
+独立校准也使用620..622，因此这些是未进入训练的校准/评估初态，不能称完全未触碰的盲测。
+自动跟进已切换到本轮，预算耗尽并交付结果后暂停，不自动开启下轮实验。
 
 ## ml-debug 运行表（准备阶段）
 
 | 检查 | 当前证据 / 待验 |
 |---|---|
-| 完整日志与配置 | 首次 prepare 完整 traceback 已读；第二次运行中，config.json 固定任务/种子/预算 |
-| SHOULD 与实测 | 同初态、黑图、stats、预算断言已实现；实际完成结果待填 |
-| null 与尺度 | 教师 × 五目标矩阵设计已实现；数值待采集 |
+| 完整日志与配置 | 首次 prepare 完整 traceback 已读；最终prepare3完整1767行无新异常，config.json固定任务/种子/预算 |
+| SHOULD 与实测 | 同初态、黑图、stats与native边界独立通过；训练预算实际值待完成 |
+| null 与尺度 | 教师静态任务15/15、错目标0/60；行走12s strict0/3但全部稳定 |
 | 初始 demo | baseline / zero 待执行 |
-| persistence | 数据到位后补逐任务同输入离线对照，不代替闭环 |
+| persistence | 入口已包含每任务起点/20tick的12chunks对照；运行结果待填，不代替闭环 |
 | baseline / held-out | 待执行；新初态620..622不进入训练 |
 | warmup / lr | 原生 warmup100、decay2000；实际日志待填 |
 | 完整 sample | 第一条教师 trace 已落盘；模型实际输入/chunk 待 smoke |
 | 最差 step / grad | 未训练，unknown；需要原生训练日志 |
 | 意外日志 | NumPy bool 序列化失败；explained: 已修复并测试 |
-| 尚缺证据 | 教师尺度、数据完整审计、真实 smoke、最终物理效果 |
+| 尚缺证据 | 真实GPU smoke、正式训练与最终物理效果 |
 | 竞争解释 | 见上方先验，均尚未作为结果归因 |
 | 新上下文审查 | 发现平均误差与smoke gate风险，已修正；剩余需实际产物验证 |
 | 最便宜区分实验 | 同初态不同文本/同噪声的首个chunk + 短闭环，区分文本启动与姿态维持 |
