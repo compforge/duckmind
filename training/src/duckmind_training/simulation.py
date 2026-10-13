@@ -100,16 +100,32 @@ class Simulation:
         self.yaw_travel = 0.0
         self.previous_yaw = self.origin_yaw
 
-    def prepare(self, task: Task, seed: int) -> None:
+    def prepare(self, task: Task, seed: int) -> dict:
         self.reset(seed)
+        preparation = {"initial_twist": list(task.initial_twist), "metrics": []}
         if any(task.initial_twist):
             self.expert.set_vel_cmd(*task.initial_twist)
+            preparation["metrics"].append(self.metrics())
             for _ in range(100):
                 self.teacher_step()
+                preparation["metrics"].append(self.metrics())
+            # Preserve moving-start evidence before mark_origin clears the speed window.
+            tail = preparation["metrics"][-51:]
+            signed_progress = (tail[-1]["forward_m"] - tail[0]["forward_m"]) * np.sign(
+                task.initial_twist[0]
+            )
+            preparation["signed_tail_progress_m"] = float(signed_progress)
+            if task.initial_twist[0] and (
+                signed_progress <= 0.03 or not all(m["stable"] for m in tail)
+            ):
+                raise ValueError(
+                    f"expert did not establish the requested moving direction: {task.name}"
+                )
             # Stop examples start from an actually moving body, never a stationary reset.
             if not self.metrics()["stable"] or np.mean(self.tail_speeds) < 0.06:
                 raise ValueError(f"expert cannot prepare moving start for {task.name}")
         self.mark_origin()
+        return preparation
 
     def command(self, task: Task) -> None:
         self.expert.head_offset[:] = task.head

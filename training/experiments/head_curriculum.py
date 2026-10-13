@@ -1,4 +1,4 @@
-"""Bounded stationary-head curriculum with walking replay and matched text trials.
+"""Bounded language-action curricula with replay and matched text trials.
 
 Run prepare first; inspect its teacher/data audit before train-evaluate. Native LeRobot
 owns the optimizer and checkpoint format. This driver owns the experiment and evidence.
@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -27,17 +27,35 @@ from duckmind_training.contract import (
     Task,
     policy_state,
 )
-from duckmind_training.correction_quality import recovery_outcome, stationary_head_outcome
+from duckmind_training.correction_quality import (
+    locomotion_outcome,
+    recovery_outcome,
+    stationary_head_outcome,
+)
 from duckmind_training.corrections import Trace, expert_rollout
 from duckmind_training.dataset import precise_numeric_stats
 from duckmind_training.learned import SmolPolicy
 from duckmind_training.simulation import Simulation
 
-NAMES = ("stand", "look_left", "look_right", "look_up", "look_down", "forward")
-SELECTED = {task.name: task for task in TASKS if task.name in NAMES}
-UNSEEN = dict(
+
+@dataclass(frozen=True)
+class Curriculum:
+    name: str
+    new_tasks: tuple[str, ...]
+    tasks: tuple[str, ...]
+    train_seeds: tuple[int, ...]
+    calibration_seeds: tuple[int, ...]
+    eval_seeds: tuple[int, ...]
+    unseen: dict[str, str]
+    formal_steps: int
+    replay_episodes: int
+    replay_frames: int
+
+
+HEAD_TASKS = ("stand", "look_left", "look_right", "look_up", "look_down", "forward")
+HEAD_UNSEEN = dict(
     zip(
-        NAMES,
+        HEAD_TASKS,
         (
             "站在原地保持不动",
             "脑袋朝左边转一点",
@@ -49,9 +67,49 @@ UNSEEN = dict(
         strict=True,
     )
 )
+MOTION_TASKS = ("backward", "turn_left", "turn_right", "stop_forward", "stop_backward")
+COURSES = {
+    "heads": Curriculum(
+        "v18-heads",
+        HEAD_TASKS[:-1],
+        HEAD_TASKS,
+        tuple(range(600, 610)),
+        (620, 621, 622),
+        (620, 621, 622),
+        HEAD_UNSEEN,
+        2000,
+        30,
+        10600,
+    ),
+    "motion": Curriculum(
+        "v19-motion",
+        MOTION_TASKS,
+        HEAD_TASKS + MOTION_TASKS + ("continue_forward", "continue_backward"),
+        tuple(range(700, 710)),
+        (720, 721, 722),
+        (730, 731, 732),
+        {
+            **HEAD_UNSEEN,
+            "backward": "朝身后退着走",
+            "turn_left": "让身体朝左边转过去",
+            "turn_right": "让身体朝右边转过去",
+            "stop_forward": "结束走动，停在这里",
+            "stop_backward": "结束走动，停在这里",
+            "continue_forward": "朝着正前方迈步前行",
+            "continue_backward": "朝身后退着走",
+        },
+        4000,
+        80,
+        20600,
+    ),
+}
+SELECTED = {task.name: task for task in TASKS}
+for direction in ("forward", "backward"):
+    moving = SELECTED[direction]
+    SELECTED["continue_" + direction] = replace(
+        moving, name="continue_" + direction, initial_twist=moving.twist
+    )
 HEAD_KEYS = ("neck_pitch_delta", "head_pitch_delta", "head_yaw_delta", "head_roll_delta")
-TRAIN_SEEDS = tuple(range(600, 610))
-EVAL_SEEDS = (620, 621, 622)
 H, E = 10, 5
 BLACK = np.zeros((256, 256, 3), dtype=np.uint8)
 
@@ -76,10 +134,14 @@ def dataset(root: Path, *, chunks: bool = False) -> LeRobotDataset:
 
 
 def outcome(task: Task, metrics: list[dict], steps: int, gaze: np.ndarray) -> dict:
-    if task.name == "forward":
+    if task.name in ("forward", "continue_forward"):
         result = recovery_outcome(metrics, steps)
         result["quality_4s"] = recovery_outcome(metrics[:201], 200)
         return result
+    if task.name == "continue_backward":
+        return locomotion_outcome(replace(task, name="backward"), metrics, steps)
+    if task.name in MOTION_TASKS:
+        return locomotion_outcome(task, metrics, steps)
     result = stationary_head_outcome(task, metrics, steps)
     # Optical-axis motion prevents compensating joints from faking a look direction.
     shift = gaze[-50:] - gaze[0]
@@ -99,7 +161,7 @@ def outcome(task: Task, metrics: list[dict], steps: int, gaze: np.ndarray) -> di
     return result
 
 
-def initial_witness(root: Path, sim: Simulation, seed: int) -> None:
+def initial_witness(root: Path, sim: Simulation, seed: int, task: Task, preparation: dict) -> None:
     folder = root / "initial"
     folder.mkdir(exist_ok=True)
     state, _ = sim.observe()
@@ -108,7 +170,14 @@ def initial_witness(root: Path, sim: Simulation, seed: int) -> None:
         "previous_target": sim.previous_target(),
         "physics": sim.integration_state(),
     }
-    path = folder / f"{seed}.npz"
+    # Stop tasks must share the same moving reset across texts/models, not a standing reset.
+    group = "-moving-" + str(task.initial_twist[0]) if any(task.initial_twist) else ""
+    path = folder / f"{seed}{group}.npz"
+    prep_path = path.with_suffix(".json")
+    if prep_path.exists():
+        assert json.loads(prep_path.read_text()) == preparation
+    else:
+        write(prep_path, preparation)
     if path.exists():
         with np.load(path) as saved:
             for key, value in values.items():
@@ -149,12 +218,25 @@ def processor_audit(checkpoint: Path, data: Path) -> dict:
     return observed
 
 
+def source_witness() -> dict[str, str]:
+    training = Path(__file__).resolve().parents[1]
+    files = [
+        Path(__file__),
+        *training.joinpath("experiments").glob("run-*-curriculum.sh"),
+        *training.joinpath("src/duckmind_training").glob("*.py"),
+        *training.parent.joinpath("policy/src/duckmind_policy").glob("*.py"),
+        training / "requirements.txt",
+    ]
+    return {str(p.resolve()): sha256(p) for p in files if p.is_file()}
+
+
 def prepare(args: argparse.Namespace) -> None:
     import av
     from lerobot.configs.video import RGBEncoderConfig
     from lerobot.policies.factory import make_pre_post_processors
     from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 
+    course = args.course
     root = args.root
     root.mkdir(exist_ok=False, parents=True)
     assert shutil.disk_usage(root).free > 20 * 2**30
@@ -162,12 +244,14 @@ def prepare(args: argparse.Namespace) -> None:
         root / "config.json",
         {
             **{k: str(v) for k, v in vars(args).items()},
-            "tasks": [asdict(SELECTED[n]) for n in NAMES],
-            "unseen": UNSEEN,
-            "train_seeds": TRAIN_SEEDS,
-            "eval_seeds": EVAL_SEEDS,
-            "budget_updates": 2002,
-            "formal_updates": 2000,
+            "curriculum": asdict(course),
+            "tasks": [asdict(SELECTED[n]) for n in course.tasks],
+            "unseen": course.unseen,
+            "train_seeds": course.train_seeds,
+            "calibration_seeds": course.calibration_seeds,
+            "eval_seeds": course.eval_seeds,
+            "budget_updates": course.formal_steps + 2,
+            "formal_updates": course.formal_steps,
             "optimizer_seed": 42,
             "batch_size": 8,
             "horizon": H,
@@ -175,15 +259,16 @@ def prepare(args: argparse.Namespace) -> None:
             "fixed_image": True,
             "physics_paused": True,
             "source": sha256(Path(__file__)),
+            "source_files": source_witness(),
         },
     )
     note(
         root,
-        "# v18 head curriculum\n"
-        "SHOULD: same initial physics/state/prior across tasks; text is the only task cue.\n"
+        f"# {course.name} curriculum\n"
+        "SHOULD: same initial physics/state/prior within each start mode; text is the task cue.\n"
         "SHOULD: teacher and null/wrong-goal scale before training; preserve every failure.\n"
         "SHOULD: training-only float64 stats, black images, state51, H10/E5; "
-        "2 smoke +2000 formal updates maximum.\n",
+        f"2 smoke +{course.formal_steps} formal updates maximum.\n",
     )
     raw = root / "teacher"
     raw.mkdir()
@@ -196,30 +281,44 @@ def prepare(args: argparse.Namespace) -> None:
     }
     numeric = []
     source = dataset(args.replay)
-    # Existing forward data is replay, not new independent trajectories; preserve its text.
+    # Replay retains episode labels as well as every numerical frame and language string.
+    replay_audit = args.replay.parent / "data-audit.json"
+    families = (
+        [e["family"] for e in json.loads(replay_audit.read_text())["episodes"]]
+        if course.name == "v19-motion"
+        else ["forward"] * source.num_episodes
+    )
+    assert len(families) == source.num_episodes
     for ep in range(source.num_episodes):
         rows = source.hf_dataset.filter(lambda row, ep=ep: row["episode_index"] == ep)
+        if course.name == "v19-motion":
+            declared = json.loads(replay_audit.read_text())["episodes"][ep]
+            assert declared["frames"] == len(rows)
+            assert declared["text"] == str(source.meta.tasks.iloc[int(rows[0]["task_index"])].name)
         numeric.append(
             {
                 "observation.state": np.asarray(rows["observation.state"]),
                 "action": np.asarray(rows["action"]),
                 "texts": [str(source.meta.tasks.iloc[int(i)].name) for i in rows["task_index"]],
-                "family": "forward",
+                "family": families[ep],
             }
         )
-    assert sum(len(e["action"]) for e in numeric) == 10600
-    assert source.num_episodes == 30 and source.meta.fps == 50
+    assert sum(len(e["action"]) for e in numeric) == course.replay_frames
+    assert source.num_episodes == course.replay_episodes and source.meta.fps == 50
     assert tuple(source.features["observation.state"]["names"]) == PREVIOUS_TARGET_STATE_NAMES
     assert tuple(source.features["action"]["names"]) == JOINT_NAMES
     sim = Simulation(args.upstream, args.teacher)
     try:
-        for split, seeds in [("train", TRAIN_SEEDS), ("eval", EVAL_SEEDS)]:
+        for split, seeds in [
+            ("train", course.train_seeds),
+            ("calibration", course.calibration_seeds),
+        ]:
             for seed in seeds:
-                for name in NAMES if split == "eval" else NAMES[:-1]:
-                    task = SELECTED[name] if split == "eval" else SELECTED[name].sample(seed)
+                for name in course.tasks if split == "calibration" else course.new_tasks:
+                    task = SELECTED[name] if split == "calibration" else SELECTED[name].sample(seed)
                     steps = 600 if name == "forward" else 200
-                    sim.prepare(task, seed)
-                    initial_witness(root, sim, seed)
+                    preparation = sim.prepare(task, seed)
+                    initial_witness(root, sim, seed, task, preparation)
                     sim.command(task)
                     trace = expert_rollout(sim, steps)
                     identity = f"{split}-{seed}-{name}"
@@ -238,7 +337,8 @@ def prepare(args: argparse.Namespace) -> None:
                     # Judge each outcome against all goals to expose wrong-goal shortcuts.
                     row["goal_scores"] = {
                         n: outcome(SELECTED[n], trace.metrics, steps, gaze)["accepted"]
-                        for n in NAMES[:-1]
+                        for n in course.tasks
+                        if n != "forward" and SELECTED[n].initial_twist == task.initial_twist
                     }
                     report["episodes" if split == "train" else "evaluation"].append(row)
                     write(raw / "report.json", report)
@@ -259,25 +359,59 @@ def prepare(args: argparse.Namespace) -> None:
                             {
                                 "observation.state": states,
                                 "action": actions,
-                                "texts": [task.texts[(seed - TRAIN_SEEDS[0]) % 2]] * len(actions),
+                                "texts": [task.texts[(seed - course.train_seeds[0]) % 2]]
+                                * len(actions),
                                 "family": name,
                             }
                         )
+        if course.name == "v19-motion":
+            controls = []
+            for seed in course.calibration_seeds:
+                for name in ("stop_forward", "stop_backward"):
+                    task = SELECTED[name]
+                    for mode in ("continue", "hold_target"):
+                        preparation = sim.prepare(task, seed)
+                        initial_witness(root, sim, seed, task, preparation)
+                        if mode == "continue":
+                            sim.command(replace(task, twist=task.initial_twist))
+                            trace = expert_rollout(sim, 200)
+                        else:
+                            trace = Trace()
+                            trace.mark(sim)
+                            target = sim.previous_target().copy()
+                            for _ in range(200):
+                                if not sim.metrics()["stable"]:
+                                    break
+                                trace.step(sim, target)
+                        identity = f"control-{seed}-{name}-{mode}"
+                        trace.save(raw / f"{identity}.npz")
+                        quality = outcome(task, trace.metrics, 200, trace_gaze(sim, trace.physics))
+                        controls.append({"id": identity, "mode": mode, "quality": quality})
+                        write(raw / "stop-controls.json", controls)
+                        note(root, f"Stop control {identity}: {quality!r}")
+            assert all(
+                not row["quality"]["accepted"] for row in controls if row["mode"] == "continue"
+            )
     finally:
         sim.close()
-    for name in NAMES[:-1]:
+    required_calibration = course.new_tasks + (
+        ("continue_forward", "continue_backward") if course.name == "v19-motion" else ()
+    )
+    for name in course.new_tasks:
         assert (
             sum(r["quality"]["accepted"] and r["name"] == name for r in report["episodes"]) >= 8
         ), name
-        assert all(r["quality"]["accepted"] for r in report["evaluation"] if r["name"] == name), (
-            name
-        )
+    for name in required_calibration:
+        rows = [r for r in report["evaluation"] if r["name"] == name]
+        assert len(rows) == len(course.calibration_seeds) and all(
+            r["quality"]["accepted"] for r in rows
+        ), name
     # Standing should never score as any of the four head commands.
     assert all(
         not r["goal_scores"][n]
         for r in report["evaluation"]
         if r["name"] == "stand"
-        for n in NAMES[1:5]
+        for n in HEAD_TASKS[1:5]
     )
     report["stage"] = "complete"
     write(raw / "report.json", report)
@@ -296,7 +430,7 @@ def prepare(args: argparse.Namespace) -> None:
         },
     }
     ds = LeRobotDataset.create(
-        "duckmind/v18-heads",
+        "duckmind/" + course.name,
         fps=50,
         features=features,
         root=data_path,
@@ -339,7 +473,7 @@ def prepare(args: argparse.Namespace) -> None:
         str(loaded.meta.tasks.iloc[int(i)].name) for i in loaded.hf_dataset["task_index"]
     ]
     assert actual_texts == [text for e in numeric for text in e["texts"]]
-    assert not set(UNSEEN.values()).intersection(actual_texts)
+    assert not set(course.unseen.values()).intersection(actual_texts)
     offset = 0
     for e in numeric:
         length = len(e["action"])
@@ -414,6 +548,7 @@ def prepare(args: argparse.Namespace) -> None:
 def evaluate(
     args: argparse.Namespace, checkpoint: Path, phase: str, *, smoke: bool = False
 ) -> None:
+    course = args.course
     root = args.root
     out = root / phase
     out.mkdir(exist_ok=False)
@@ -468,16 +603,16 @@ def evaluate(
     ]
     sim = Simulation(args.upstream, args.teacher)
     try:
-        for seed in EVAL_SEEDS[:1] if smoke else EVAL_SEEDS:
-            for name in NAMES:
+        for seed in course.eval_seeds[:1] if smoke else course.eval_seeds:
+            for name in course.tasks:
                 task = SELECTED[name]
                 for language, text in (
                     [("trained", task.texts[0])]
                     if smoke
-                    else [("trained", task.texts[0]), ("unseen", UNSEEN[name])]
+                    else [("trained", task.texts[0]), ("unseen", course.unseen[name])]
                 ):
-                    sim.prepare(task, seed)
-                    initial_witness(root, sim, seed)
+                    preparation = sim.prepare(task, seed)
+                    initial_witness(root, sim, seed, task, preparation)
                     # Do not set teacher command: learned text is the sole task input.
                     trace = Trace()
                     trace.mark(sim)
@@ -542,7 +677,8 @@ def evaluate(
                         and all(m["stable"] for m in trace.metrics),
                         "goal_scores": {
                             n: outcome(SELECTED[n], trace.metrics, steps, gaze)["accepted"]
-                            for n in NAMES[:-1]
+                            for n in course.tasks
+                            if n != "forward" and SELECTED[n].initial_twist == task.initial_twist
                         },
                         "latency_median_s": float(np.median(saved["latency_s"])),
                     }
@@ -554,7 +690,7 @@ def evaluate(
                         f"accepted={quality['accepted']} stable={row['stable']}",
                     )
         if smoke:
-            assert len(report["trials"]) == 6
+            assert len(report["trials"]) == len(course.tasks)
             assert all(r["ticks"] == 10 and r["reason"] == "completed" for r in report["trials"]), (
                 report["trials"]
             )
@@ -568,16 +704,18 @@ def evaluate(
 
 def run(args: argparse.Namespace) -> None:
     root = args.root
+    prepared = json.loads((root / "config.json").read_text())
+    assert prepared["curriculum"] == json.loads(json.dumps(asdict(args.course))), (
+        "prepared curriculum differs"
+    )
+    assert prepared["source"] == sha256(Path(__file__)), "source changed since prepare"
+    assert prepared["source_files"] == source_witness(), "runtime source changed since prepare"
+    for key in ("replay", "initial", "upstream", "teacher"):
+        assert prepared[key] == str(getattr(args, key)), f"prepared {key} differs"
     assert not (root / "run.pid").exists(), "run already started; inspect before any recovery"
     (root / "run.pid").write_text(str(os.getpid()))
     audit = json.loads((root / "data-audit.json").read_text())
-    files = [
-        Path(__file__),
-        *Path("src/duckmind_training").glob("*.py"),
-        *Path("../policy/src/duckmind_policy").glob("*.py"),
-        Path("requirements.txt"),
-    ]
-    witness = {str(p.resolve()): sha256(p) for p in files if p.is_file()}
+    witness = source_witness()
     write(root / "run-source-sha256.json", witness)
     assert all(sha256(Path(p)) == value for p, value in audit["dataset_sha256"].items())
     assert sha256(args.initial / "model.safetensors") == audit["initial_sha256"]
@@ -620,7 +758,7 @@ def run(args: argparse.Namespace) -> None:
         stage("evaluate-zero")
         evaluate(args, root / "zero-checkpoint", "zero-eval")
         stage("train")
-        final = train(2000, "model")
+        final = train(args.course.formal_steps, "model")
         stage("evaluate-final")
         evaluate(args, final, "final")
         stage("verify")
@@ -662,7 +800,12 @@ def calibrate_gaze(args: argparse.Namespace) -> None:
     sim = Simulation(args.upstream, args.teacher)
     rows = []
     try:
-        for path in sorted((args.root / "teacher").glob("eval-*.npz")):
+        paths = sorted((args.root / "teacher").glob("calibration-*.npz"))
+        if not paths:
+            paths = sorted((args.root / "teacher").glob("eval-*.npz"))
+        if not paths:
+            raise ValueError("no saved calibration trajectories")
+        for path in paths:
             with np.load(path) as saved:
                 angles = trace_gaze(sim, saved["integration_state"])
             rows.append(
@@ -682,7 +825,9 @@ def main() -> None:
     parser.add_argument("stage", choices=("prepare", "train-evaluate", "calibrate-gaze"))
     for name in ("root", "replay", "initial", "upstream", "teacher"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--course", choices=tuple(COURSES), default="heads")
     args = parser.parse_args()
+    args.course = COURSES[args.course]
     {"prepare": prepare, "train-evaluate": run, "calibrate-gaze": calibrate_gaze}[args.stage](args)
 
 
