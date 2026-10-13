@@ -74,3 +74,16 @@ postcheck退出1，不能称整个工具全成功；PR5实验描述已更新，�
 Git revision记录为null并保留原错误，teacher、推理源码、scene的文件哈希作为已验证身份。
 元数据收尾退出0，prepare.exit-code=0；这不抹去首次prepare失败。
 独立数据审核未完成前，不启动训练。恢复代码make fix/lint/test通过（17passed、2skipped）。
+
+## 独立审核与启动
+
+独立CPU审核11项通过（工件parent independent-preflight-audit.json/.md）：旧129eps逐帧保持，
+新5窗口与raw精确对应，6候选和5正控严格评分重算一致；2global+268episode数值统计、
+6zero有效张量与manifest哈希一致。原生sampler完整索引检查确认control2000、mixed3000帧，
+没有其他任务混入；逐episode首中尾75样本和真实DataLoader48样本的全局索引、H10未来动作
+与padding均准确。CPU审核workers0，真实训练workers2由smoke覆盖。
+全31400黑图解码复用prepare完整结果及哈希，并独立抽检；未使用的近似quantile未重算。
+
+唯一训练launcher PID1897903已启动，入口train-backward-pair，冻结源码da1ede7b3f4f74dd7ba5211277773e04252483e3。
+预算仍为每组2smoke+1000正式，共2004；需等zero/control/mixed所有物理验收后比较能力。
+原准备失败日志与attempt1审计继续保留；本次只续元数据收尾，未重复采集或训练。
