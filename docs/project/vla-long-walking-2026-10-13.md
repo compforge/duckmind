@@ -117,18 +117,18 @@ Both smoke runs completed two optimizer updates and ten physical ticks. Independ
 checked 54 raw-evidence assertions: six effective processor tensors, checkpoint identity, black
 inputs, state/prior alignment, predicted-to-executed targets and recomputed fit metrics. Both
 short rollouts remained stable; strict success is false because 0.2 seconds cannot satisfy the
-4/8/12-second duration gates. Formal control training has started. `run.stage`, `run.log` and `run.exit-code`
-are authoritative. Scheduled follow-up is active until final audit/delivery, then must pause.
-This launch status is not a trained-capability result; no new learned-policy success is claimed.
+4/8/12-second duration gates. Both formal arms subsequently completed exactly 1,000 updates. `run.stage`, `run.log` and `run.exit-code`
+are authoritative. Scheduled follow-up is paused after final audit and delivery; no further training is authorized by this run.
+The launch checks establish pipeline integrity; physical results are reported below.
 
 ## Evaluation output collision and bounded recovery
 
 Post-launch review found an orchestration defect: preparation creates `experiment-v17/zero`
 as a checkpoint directory, while the frozen launcher later uses the same name for evaluation
-output. Its exclusive output-directory creation will fail before zero-model inference. This
+output. Its exclusive output-directory creation failed before zero-model inference. This
 does not affect training or baseline evaluation, and neither running script is modified.
 
-`training/artifacts/run-v17-eval-resume.sh` is an evaluation-only continuation, not yet started.
+`training/artifacts/run-v17-eval-resume.sh` continued evaluation after the original launcher exited with code 1 at 02:05 UTC.
 It requires the original launcher to have exited at `evaluate-zero` with code 1 and the expected
 `FileExistsError`, unchanged input hashes, both formal checkpoints at exactly 1,000 updates,
 and a complete baseline report with the fourteen predeclared unique cases. It also refuses
@@ -136,3 +136,63 @@ existing destination directories. After those gates, it evaluates the unchanged 
 into `zero-eval`, then control and mixed, and checks hashes again. No optimizer update is possible
 in this continuation. Preserve the original failure and separate `resume.stage/log/exit-code`;
 follow-up must not restart the original launcher or overwrite prior results.
+
+## Completed result
+
+The evaluation-only continuation completed at **2026-10-13 02:29 UTC** with exit code **0**.
+The original failed launch remains recorded with exit code 1. No training was repeated: two
+smoke runs of two updates and two formal runs of 1,000 updates total **2,004 updates**.
+Independent training audit checked 2,203 assertions, all optimizer state was finite, effective
+processors matched the union, and source/data/model provenance checks passed.
+
+**The mixture improves sustained balance in this evaluation, but does not solve straight walking.**
+All rows use fourteen paired trials; 4/8/12-second outcomes are nested prefixes. Stability alone
+means completing the window without violating the existing balance checks. Strict success also
+requires forward progress, bounded original-heading and lateral drift, and end-window checks.
+
+| Model / evidence | Stable 4s ↑ | Stable 8s ↑ | Stable 12s ↑ | Strict 4s ↑ | Strict 8s ↑ | Strict 12s ↑ |
+|---|---:|---:|---:|---:|---:|---:|
+| *Original v14 weights + original stats (`baseline/report.json`)* | 13/14 | 7/14 | 5/14 | 11/14 | 4/14 | 0/14 |
+| *Same weights + union stats (`zero-eval/report.json`)* | 13/14 | 9/14 | 7/14 | **12/14** | **6/14** | **4/14** |
+| Original-data training (`control/report.json`) | 11/14 | 8/14 | 6/14 | 7/14 | 0/14 | 0/14 |
+| Long/recovery mixture (`mixed/report.json`) | 13/14 | **12/14** | **12/14** | 11/14 | 2/14 | 1/14 |
+
+On the four fresh bodies crossed with two inference-noise seeds, stable 12-second outcomes are
+4/8 baseline, 4/8 zero, 3/8 control and 7/8 mixed. Strict outcomes are 0/8, 2/8, 0/8 and 1/8.
+Known-body stable outcomes are respectively 1/6, 3/6, 3/6 and 5/6. These are four fresh physical
+initial conditions, not eight independently trained policies; only one optimizer seed was used.
+
+Of the twelve stable mixed rollouts, eleven fail the original-heading condition; two also fail
+lateral-drift limits. All twelve pass forward-progress and final-window forward-progress checks.
+Thus the dominant remaining issue is direction retention, rather than an apparent stability gain
+from simply standing still. The two unstable cases remain in the denominator and all raw traces
+are retained. Zero-update normalization alone changes outcomes substantially, and has more strict
+12-second successes than either trained arm. This is not evidence of overall command replacement.
+
+Median inference latency is 252.7 / 246.1 / 253.6 / 253.9 ms for baseline / zero / control / mixed;
+p95 is 297.4 / 288.6 / 300.7 / 299.5 ms. Five executed targets cover only 100 ms. Because physics
+pauses for inference, these results do not establish a real-time robotd deployment.
+
+Offline fit on twelve old training chunks yields MSE 0.000603 / 0.000662 / 0.000642 / 0.000536
+rad², versus persistence 0.094813. This is a training diagnostic, not a held-out score; lower
+error does not override the physical heading failures. Training losses likewise come from
+different sampling distributions and cannot rank task competence.
+
+## Research decision
+
+Keep the mixed checkpoint as a sustained-balance candidate and retain the zero checkpoint as a
+useful direction-sensitive comparison. Do not replace the existing expert or claim language,
+vision or real-time capability. No further training is launched automatically.
+
+The next experiment should distinguish **body-relative forward walking** from **holding the
+initial task heading**. Long expert demonstrations here usually fail the latter condition too;
+more of those examples need not teach straight-line motion. The policy observes joint state,
+angular velocity, projected gravity and the previous target, but not accumulated task-relative
+yaw error. That observation boundary is a plausible contributor, not a proven diagnosis.
+Before another training run, establish a heading-consistent expert/data target and test whether
+explicit task-relative heading observation is necessary. Keep normalization and update budgets
+controlled; do not attribute the present mixture result solely to episode length or corrections.
+
+All raw evidence remains under `training/artifacts/experiment-v17`, including both launch logs,
+checkpoints, source hashes, every trace and actual model input. Independent collection, dataset,
+smoke, training and evaluation audits are retained beside the results.
