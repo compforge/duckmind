@@ -1192,6 +1192,41 @@ def prepare_backward_corrections(args: argparse.Namespace) -> None:
     finally:
         sim.close()
     prepare_data(args, numeric)
+    finalize_backward_preparation(args)
+
+
+def finalize_backward_preparation(args: argparse.Namespace) -> None:
+    """Finish provenance from saved artifacts without repeating collection or training."""
+    root = args.root
+    assert not (root / "pair-config.json").exists() and not (root / "run.pid").exists()
+    report = json.loads((root / "teacher/report.json").read_text())
+    audit = json.loads((root / "data-audit.json").read_text())
+    accepted = [r for r in report["candidates"] if r["quality"]["accepted"]]
+    assert report["stage"] == "complete" and len(report["candidates"]) == 6
+    assert len(accepted) >= 4 and {r["seed"] for r in accepted} == {700, 730}
+    assert len(audit["episodes"]) == 129 + len(accepted)
+    assert audit["frames"] == 30400 + 200 * len(accepted)
+    for key in ("source_sha256", "dataset_sha256"):
+        assert all(sha256(Path(p)) == value for p, value in audit[key].items())
+    assert audit["initial_sha256"] == sha256(args.initial / "model.safetensors")
+    assert sha256(root / "zero-checkpoint/model.safetensors") == audit["initial_sha256"]
+    processor_audit(root / "zero-checkpoint", root / "dataset")
+    control_episodes = [
+        i for i, e in enumerate(audit["episodes"][:129]) if e["family"] == "backward"
+    ]
+    assert len(control_episodes) == 10
+    revision = subprocess.run(
+        ["git", "-C", str(args.upstream), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if revision.returncode:
+        note(
+            root,
+            "Upstream Git revision unavailable; verified file hashes retain source identity: "
+            + revision.stderr.strip(),
+        )
     config = {
         "argv": sys.argv,
         "source_files": source_witness(),
@@ -1201,7 +1236,7 @@ def prepare_backward_corrections(args: argparse.Namespace) -> None:
             for k in ("root", "replay", "initial", "upstream", "teacher")
         },
         "control_episodes": control_episodes,
-        "mixed_episodes": control_episodes + list(range(129, len(numeric))),
+        "mixed_episodes": control_episodes + list(range(129, len(audit["episodes"]))),
         "updates_per_arm": {"discarded_smoke": 2, "formal": 1000},
         "max_updates": 2004,
         "eval_backward_bodies": [700, 730, 740, 741, 742],
@@ -1215,9 +1250,8 @@ def prepare_backward_corrections(args: argparse.Namespace) -> None:
                 args.upstream / "src/mjlab_microduck/robot/microduck/scene.xml",
             )
         },
-        "upstream_commit": subprocess.check_output(
-            ["git", "-C", str(args.upstream), "rev-parse", "HEAD"], text=True
-        ).strip(),
+        "upstream_commit": revision.stdout.strip() if revision.returncode == 0 else None,
+        "upstream_git_error": revision.stderr.strip() if revision.returncode else None,
     }
     write(root / "pair-config.json", config)
     (root / "prepare.exit-code").write_text("0")
@@ -1314,6 +1348,7 @@ def main() -> None:
             "check-starts",
             "diagnose-backward",
             "prepare-backward-corrections",
+            "finalize-backward-preparation",
             "train-backward-pair",
         ),
     )
@@ -1330,6 +1365,7 @@ def main() -> None:
         "check-starts": check_starts,
         "diagnose-backward": diagnose_backward,
         "prepare-backward-corrections": prepare_backward_corrections,
+        "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
     }[args.stage](args)
 

@@ -53,10 +53,10 @@ zero只替换union统计、0更新；control/mixed各自训练后采用相同22c
 
 ## 采集进展
 
-prepare唯一进程1852532已完成6候选与5个教师正控，正在原生数据转换。
+prepare进程1852532已完成6候选、5个教师正控和原生数据转换，随后在记录上游Git版本时退出。
 5个纠偏窗口通过，共1000帧；700prefix20全程稳定但净后退和尾部后退未达标，
 保留原始轨迹、不纳入训练。5个teacher-only正控均通过，完整学生失败回放与接管点物理精确一致。
-预计union134eps/31400frames，control10eps/2000frames，mixed15eps/3000frames。
+实际union134eps/31400frames，control10eps/2000frames，mixed15eps/3000frames。
 实际以prepare.exit-code=0、data-audit和独立审计为准，当前尚未正式训练。
 
 代码d57ecd376e2d712f5d2c62f3db8c666193f2c4a9已推送并核验远端一致，训练组件
@@ -64,3 +64,13 @@ make fix/lint/test通过（17passed、2skipped）。devloop提交推送后仍因
 postcheck退出1，不能称整个工具全成功；PR5实验描述已更新，未自动合并。
 独立审计重点是非连续episode选择的全局/本地索引映射、实际future-action/padding、
 两组fullunion归一化以及纠偏raw到dataset时序。审计通过才可唯一启动2004更新流程。
+
+## 准备收尾恢复
+
+首次prepare在数据和zero checkpoint保存后，调用上游`git rev-parse HEAD`失败；devbox上的
+上游是无`.git`的同步源码目录。原prepare.log与prepare-attempt1-source.py保留，未进行训练。
+修复把收尾独立为`finalize-backward-preparation`：读取已保存manifest，核验源/数据/初始权重
+哈希及6个有效processor，重建两组选集，不重新采集、编码视频或更新参数。
+Git revision记录为null并保留原错误，teacher、推理源码、scene的文件哈希作为已验证身份。
+元数据收尾退出0，prepare.exit-code=0；这不抹去首次prepare失败。
+独立数据审核未完成前，不启动训练。恢复代码make fix/lint/test通过（17passed、2skipped）。
