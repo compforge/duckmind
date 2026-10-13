@@ -2,6 +2,8 @@
 
 Duckmind model execution: [Action Chunk API and timing contract](design/action-chunks.md).
 Model boundary and runner: [Policy inference interface](design/policy-interface.md).
+Expert demonstrations and SmolVLA: [VLA training](design/vla-training.md).
+First dataset and GPU run: [2026-10-11 baseline](project/vla-baseline-2026-10-11.md).
 
 The [README](../README.md) is the front door — what a microduck is, and where to go. If you have
 one in front of you and want to drive it, start at the [cheat sheet](robot/cheatsheet.md).
