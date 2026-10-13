@@ -902,10 +902,195 @@ def check_starts(args: argparse.Namespace) -> None:
         sim.close()
 
 
+def diagnose_backward(args: argparse.Namespace) -> None:
+    """Separate on-expert imitation, text sensitivity and closed-loop execution.
+
+    spec: weights, normalization, body state and flow noise stay fixed across texts.
+    Task-name lookup supplies diagnostic labels only; the policy receives plain text.
+    link: docs/project/vla-backward-diagnosis-2026-10-13.md
+    """
+    root, source = args.root, args.replay.parent
+    root.mkdir(parents=True, exist_ok=False)
+    (root / "run.pid").write_text(str(os.getpid()))
+    (root / "dataset").symlink_to(args.replay)
+    (root / "data-audit.json").symlink_to(source / "data-audit.json")
+    witness = source_witness()
+    checkpoint_sha = sha256(args.initial / "model.safetensors")
+    texts = (*SELECTED["backward"].texts, args.course.unseen["backward"], "保持站立", "向前走")
+    episodes = [f"train-{seed}-backward" for seed in (700, 701, 702)] + [
+        f"calibration-{seed}-backward" for seed in (720, 721, 722)
+    ]
+    ticks = (0, 20, 60, 100, 140, 180)
+    report = {
+        "stage": "started",
+        "optimizer_updates": 0,
+        "argv": sys.argv,
+        "paths": {
+            k: str(getattr(args, k).resolve())
+            for k in ("root", "replay", "initial", "upstream", "teacher")
+        },
+        "text_roles": [
+            "trained",
+            "trained",
+            "never-trained-catalog",
+            "v19-held-out",
+            "wrong-goal-stand",
+            "wrong-goal-forward",
+        ],
+        "model_sha256": checkpoint_sha,
+        "source_files": witness,
+        "processors": processor_audit(args.initial, args.replay),
+        "texts": texts,
+        "episodes": episodes,
+        "ticks": ticks,
+        "rows": [],
+        "artifact_sha256": {},
+    }
+    note(
+        root,
+        "# Backward diagnosis\nSHOULD: 0 updates; identical state/prior/noise across texts.\n"
+        "SHOULD: 6 episodes × 6 ticks × 6 texts = 216 paired predictions.\n"
+        "Training/calibration/development states only; no new holdout claim.",
+    )
+    model = SmolPolicy(args.initial)
+    predictions, targets, states, priors = [], [], [], []
+    try:
+        (root / "run.stage").write_text("offline")
+        for episode_index, identity in enumerate(episodes):
+            path = source / "teacher" / f"{identity}.npz"
+            report["artifact_sha256"][str(path)] = sha256(path)
+            with np.load(path) as raw:
+                np.testing.assert_array_equal(raw["previous_target"][1:], raw["action"][:-1])
+                for tick in ticks:
+                    state, prior = raw["state"][tick], raw["previous_target"][tick]
+                    target = raw["action"][tick : tick + H]
+                    assert target.shape == (H, 15)
+                    noise = 20000000 + episode_index * 1000 + tick
+                    # Capture native processor outputs for one matched input per text.
+                    if episode_index == 0 and tick == 0:
+                        batches = {}
+                        for text_index, text in enumerate(texts):
+                            batch = model.preprocess(
+                                {
+                                    "observation.state": torch.from_numpy(
+                                        policy_state(state, prior, include_previous_target=True)
+                                    ),
+                                    IMAGE_KEY: torch.from_numpy(BLACK.copy())
+                                    .permute(2, 0, 1)
+                                    .float(),
+                                    "task": text,
+                                }
+                            )
+                            for key, value in batch.items():
+                                if isinstance(value, torch.Tensor):
+                                    batches[f"{text_index}:{key}"] = value.cpu().numpy()
+                        np.savez_compressed(root / "native-inputs.npz", **batches)
+                    for text_index, text in enumerate(texts):
+                        torch.manual_seed(noise)
+                        chunk = model.predict(text, state, BLACK, prior)
+                        if not predictions:
+                            torch.manual_seed(noise)
+                            repeated = model.predict(text, state, BLACK, prior)
+                            np.testing.assert_array_equal(chunk, repeated)
+                            report["same_input_smoke"] = "exact"
+                        predictions.append(chunk)
+                        targets.append(target)
+                        states.append(state)
+                        priors.append(prior)
+                        error = (chunk - target) ** 2
+                        persistence = np.repeat(prior[None], H, axis=0)
+                        row = {
+                            "episode": identity,
+                            "tick": tick,
+                            "text_index": text_index,
+                            "noise_seed": noise,
+                            "first_mse": float(error[0].mean()),
+                            "executed5_mse": float(error[:E].mean()),
+                            "chunk_mse": float(error.mean()),
+                            "per_joint_mse": error.mean(0).tolist(),
+                            "persistence_mse": float(((persistence - target) ** 2).mean()),
+                        }
+                        report["rows"].append(row)
+            note(root, f"Offline {identity}: {len(report['rows'])}/216 predictions saved.")
+            write(root / "report.json", report)
+        np.savez_compressed(
+            root / "offline.npz",
+            prediction=predictions,
+            target=targets,
+            state=states,
+            previous_target=priors,
+        )
+        assert len(predictions) == 216
+        del model
+        torch.cuda.empty_cache()
+        (root / "run.stage").write_text("closed-loop")
+        # Reuse the native evaluation/Trace path; no second simulator/controller implementation.
+        args.course = replace(args.course, tasks=("backward",), eval_seeds=(700, 730, 731))
+        evaluate(args, args.initial, "reproduce")
+        comparisons = []
+        for seed in (730, 731):
+            for language in ("trained", "unseen"):
+                identity = f"{seed}-backward-{language}"
+                for suffix in (".npz", "-inputs.npz"):
+                    old, new = (
+                        source / "final" / (identity + suffix),
+                        root / "reproduce" / (identity + suffix),
+                    )
+                    report["artifact_sha256"][str(old)] = sha256(old)
+                    with np.load(old) as a, np.load(new) as b:
+                        # Wall time/rendered evidence frames may vary; policy input is always black.
+                        keys = (
+                            ("tick", "state", "previous_target", "image", "chunk")
+                            if suffix.startswith("-")
+                            else (
+                                "state",
+                                "action",
+                                "previous_target",
+                                "integration_state",
+                                "actuator_target",
+                            )
+                        )
+                        comparisons.append(
+                            {
+                                "id": identity,
+                                "file": suffix,
+                                "exact": {
+                                    key: bool(np.array_equal(a[key], b[key])) for key in keys
+                                },
+                            }
+                        )
+        report["reproduction"] = comparisons
+        assert sha256(args.initial / "model.safetensors") == checkpoint_sha
+        assert source_witness() == witness
+        assert all(sha256(Path(p)) == digest for p, digest in report["artifact_sha256"].items())
+        report["stage"] = "complete"
+        exact = all(all(c["exact"].values()) for c in comparisons)
+        note(
+            root,
+            "Complete: 0 updates; 216 paired predictions +1 same-input smoke; "
+            f"6 closed-loop cases. Reproduction exact: {exact}",
+        )
+        (root / "run.stage").write_text("complete")
+        (root / "run.exit-code").write_text("0")
+    except BaseException:
+        report["stage"] = "failed"
+        (root / "run.exit-code").write_text("1")
+        raise
+    finally:
+        write(root / "report.json", report)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "stage", choices=("prepare", "train-evaluate", "calibrate-gaze", "check-starts")
+        "stage",
+        choices=(
+            "prepare",
+            "train-evaluate",
+            "calibrate-gaze",
+            "check-starts",
+            "diagnose-backward",
+        ),
     )
     for name in ("root", "replay", "initial", "upstream", "teacher"):
         parser.add_argument("--" + name, type=Path, required=True)
@@ -917,6 +1102,7 @@ def main() -> None:
         "train-evaluate": run,
         "calibrate-gaze": calibrate_gaze,
         "check-starts": check_starts,
+        "diagnose-backward": diagnose_backward,
     }[args.stage](args)
 
 
