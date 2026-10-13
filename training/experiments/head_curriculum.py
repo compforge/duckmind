@@ -231,11 +231,6 @@ def source_witness() -> dict[str, str]:
 
 
 def prepare(args: argparse.Namespace) -> None:
-    import av
-    from lerobot.configs.video import RGBEncoderConfig
-    from lerobot.policies.factory import make_pre_post_processors
-    from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
-
     course = args.course
     root = args.root
     root.mkdir(exist_ok=False, parents=True)
@@ -435,6 +430,16 @@ def prepare(args: argparse.Namespace) -> None:
     )
     report["stage"] = "complete"
     write(raw / "report.json", report)
+    prepare_data(args, numeric)
+
+
+def prepare_data(args: argparse.Namespace, numeric: list[dict]) -> None:
+    import av
+    from lerobot.configs.video import RGBEncoderConfig
+    from lerobot.policies.factory import make_pre_post_processors
+    from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+
+    root, course = args.root, args.course
     data_path = root / "dataset"
     features = {
         "observation.state": {
@@ -561,7 +566,7 @@ def prepare(args: argparse.Namespace) -> None:
     note(
         root,
         f"Prepared {len(numeric)} episodes/{offset} frames. "
-        "Eval bodies excluded from training. No optimizer updates yet.",
+        "Split provenance remains in the experiment manifest. No optimizer updates yet.",
     )
 
 
@@ -1080,6 +1085,224 @@ def diagnose_backward(args: argparse.Namespace) -> None:
         write(root / "report.json", report)
 
 
+def prepare_backward_corrections(args: argparse.Namespace) -> None:
+    """Collect teacher recovery labels from exactly replayed student prefixes."""
+    root = args.root
+    if args.diagnosis_root is None:
+        raise ValueError("--diagnosis-root is required for backward corrections")
+    root.mkdir(parents=True, exist_ok=False)
+    assert shutil.disk_usage(root).free > 20 * 2**30
+    (root / "prepare.pid").write_text(str(os.getpid()))
+    source = dataset(args.replay)
+    original = json.loads((args.replay.parent / "data-audit.json").read_text())
+    numeric = []
+    for index, ep in enumerate(original["episodes"]):
+        rows = source.hf_dataset.filter(lambda row, index=index: row["episode_index"] == index)
+        assert len(rows) == ep["frames"]
+        numeric.append(
+            {
+                "observation.state": np.asarray(rows["observation.state"]),
+                "action": np.asarray(rows["action"]),
+                "texts": [str(source.meta.tasks.iloc[int(i)].name) for i in rows["task_index"]],
+                "family": ep["family"],
+            }
+        )
+    assert len(numeric) == 129 and sum(len(e["action"]) for e in numeric) == 30400
+    control_episodes = [i for i, e in enumerate(numeric) if e["family"] == "backward"]
+    assert len(control_episodes) == 10
+    raw = root / "teacher"
+    raw.mkdir()
+    report = {"stage": "started", "candidates": [], "controls": [], "source_sha256": {}}
+    task = SELECTED["backward"]
+    sim = Simulation(args.upstream, args.teacher)
+    note(
+        root,
+        "# Backward focused correction pair\n"
+        "SHOULD: exact student-prefix replay; teacher-only labels after handover.\n"
+        "SHOULD: retain all rejected windows; unchanged strict backward gate.\n"
+        "SHOULD: 2+1000 updates per arm, maximum2004, shared union normalization.\n"
+        "This is a backward-only diagnostic; old-task regression is required.",
+    )
+    try:
+        for seed in (700, 730, 740, 741, 742):
+            sim.prepare(task, seed)
+            sim.command(task)
+            trace = expert_rollout(sim, 200)
+            trace.save(raw / f"control-{seed}.npz")
+            quality = locomotion_outcome(task, trace.metrics, 200)
+            report["controls"].append({"seed": seed, "quality": quality})
+            write(raw / "report.json", report)
+            assert quality["accepted"], (seed, quality)
+        for seed in (700, 730):
+            path = args.diagnosis_root / "reproduce" / f"{seed}-backward-trained.npz"
+            report["source_sha256"][str(path)] = sha256(path)
+            with np.load(path) as saved:
+                # First prove the entire recorded failure is reproducible before selecting prefixes.
+                sim.prepare(task, seed)
+                np.testing.assert_array_equal(
+                    sim.integration_state(), saved["integration_state"][0]
+                )
+                for tick, action in enumerate(saved["action"]):
+                    sim.apply(action)
+                    np.testing.assert_array_equal(
+                        sim.integration_state(), saved["integration_state"][tick + 1]
+                    )
+                assert not sim.metrics()["stable"]
+                for prefix in (20, 50, 80):
+                    sim.prepare(task, seed)
+                    for action in saved["action"][:prefix]:
+                        sim.apply(action)
+                    before = sim.integration_state().copy()
+                    np.testing.assert_array_equal(before, saved["integration_state"][prefix])
+                    np.testing.assert_array_equal(
+                        sim.previous_target(), saved["action"][prefix - 1]
+                    )
+                    assert sim.metrics()["stable"]
+                    sim.resume_teacher(task)
+                    np.testing.assert_array_equal(before, sim.integration_state())
+                    trace = expert_rollout(sim, 200)
+                    identity = f"recovery-{seed}-{prefix}"
+                    trace.save(raw / f"{identity}.npz")
+                    quality = locomotion_outcome(task, trace.metrics, 200)
+                    row = {"id": identity, "seed": seed, "prefix": prefix, "quality": quality}
+                    report["candidates"].append(row)
+                    write(raw / "report.json", report)
+                    note(root, f"{identity}: ticks={len(trace.actions)} quality={quality!r}")
+                    if quality["accepted"]:
+                        states = policy_state(
+                            np.asarray(trace.states),
+                            np.asarray(trace.previous_targets),
+                            include_previous_target=True,
+                        )
+                        actions = np.asarray(trace.actions)
+                        np.testing.assert_array_equal(states[0, 36:], saved["action"][prefix - 1])
+                        np.testing.assert_array_equal(states[1:, 36:], actions[:-1])
+                        numeric.append(
+                            {
+                                "observation.state": states,
+                                "action": actions,
+                                "texts": [task.texts[(len(numeric) - 129) % 2]] * len(actions),
+                                "family": "backward",
+                            }
+                        )
+        accepted = [r for r in report["candidates"] if r["quality"]["accepted"]]
+        assert len(accepted) >= 4 and {r["seed"] for r in accepted} == {700, 730}, accepted
+        report["stage"] = "complete"
+        write(raw / "report.json", report)
+    finally:
+        sim.close()
+    prepare_data(args, numeric)
+    config = {
+        "argv": sys.argv,
+        "source_files": source_witness(),
+        "initial_sha256": sha256(args.initial / "model.safetensors"),
+        "paths": {
+            k: str(getattr(args, k).resolve())
+            for k in ("root", "replay", "initial", "upstream", "teacher")
+        },
+        "control_episodes": control_episodes,
+        "mixed_episodes": control_episodes + list(range(129, len(numeric))),
+        "updates_per_arm": {"discarded_smoke": 2, "formal": 1000},
+        "max_updates": 2004,
+        "eval_backward_bodies": [700, 730, 740, 741, 742],
+        "regression_body": 730,
+        "physics_paused": True,
+        "external_sha256": {
+            str(p): sha256(p)
+            for p in (
+                args.teacher,
+                args.upstream / "scripts/infer_policy.py",
+                args.upstream / "src/mjlab_microduck/robot/microduck/scene.xml",
+            )
+        },
+        "upstream_commit": subprocess.check_output(
+            ["git", "-C", str(args.upstream), "rev-parse", "HEAD"], text=True
+        ).strip(),
+    }
+    write(root / "pair-config.json", config)
+    (root / "prepare.exit-code").write_text("0")
+    note(
+        root,
+        f"Preparation complete; {len(accepted)}/6 accepted across2 development bodies. "
+        "No student inference or optimizer update during preparation.",
+    )
+
+
+def run_backward_pair(args: argparse.Namespace) -> None:
+    """Native episode selection isolates focused fitting from added recovery coverage."""
+    root = args.root
+    cfg = json.loads((root / "pair-config.json").read_text())
+    assert cfg["source_files"] == source_witness()
+    assert cfg["initial_sha256"] == sha256(args.initial / "model.safetensors")
+    assert all(sha256(Path(p)) == value for p, value in cfg["external_sha256"].items())
+    audit = json.loads((root / "data-audit.json").read_text())
+    assert all(sha256(Path(p)) == value for p, value in audit["dataset_sha256"].items())
+    assert not (root / "run.pid").exists()
+    (root / "run.pid").write_text(str(os.getpid()))
+    course = args.course
+
+    def stage(name: str) -> None:
+        (root / "run.stage").write_text(name)
+        note(root, f"## {name}")
+
+    def train(label: str, steps: int, episodes: list[int]) -> Path:
+        command = [
+            sys.executable,
+            "-c",
+            "from duckmind_training.train import main; main()",
+            "--dataset",
+            str(root / "dataset"),
+            "--model",
+            str(args.initial),
+            "--output",
+            str(root / label),
+            "--steps",
+            str(steps),
+            "--batch-size",
+            "8",
+            "--chunk-size",
+            str(H),
+            "--episodes",
+            *map(str, episodes),
+        ]
+        note(root, f"Native trainer argv: {command!r}")
+        subprocess.run(command, check=True)
+        checkpoint = root / label / "checkpoints" / f"{steps:06d}" / "pretrained_model"
+        processor_audit(checkpoint, root / "dataset")
+        return checkpoint
+
+    def evaluate_pair(checkpoint: Path, label: str) -> None:
+        args.course = replace(
+            course, tasks=("backward",), eval_seeds=tuple(cfg["eval_backward_bodies"])
+        )
+        evaluate(args, checkpoint, label + "-backward")
+        args.course = replace(course, tasks=HEAD_TASKS, eval_seeds=(cfg["regression_body"],))
+        evaluate(args, checkpoint, label + "-regression")
+
+    try:
+        for arm in ("control", "mixed"):
+            stage("smoke-" + arm)
+            smoke = train("smoke-" + arm, 2, cfg[arm + "_episodes"])
+            args.course = replace(course, tasks=("backward",), eval_seeds=(700,))
+            evaluate(args, smoke, "smoke-eval-" + arm, smoke=True)
+        stage("zero")
+        evaluate_pair(root / "zero-checkpoint", "zero")
+        for arm in ("control", "mixed"):
+            stage("train-" + arm)
+            checkpoint = train("model-" + arm, 1000, cfg[arm + "_episodes"])
+            stage("evaluate-" + arm)
+            evaluate_pair(checkpoint, arm)
+        stage("verify")
+        assert cfg["source_files"] == source_witness()
+        assert cfg["initial_sha256"] == sha256(args.initial / "model.safetensors")
+        assert all(sha256(Path(p)) == value for p, value in audit["dataset_sha256"].items())
+        stage("complete")
+        (root / "run.exit-code").write_text("0")
+    except BaseException:
+        (root / "run.exit-code").write_text("1")
+        raise
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1090,11 +1313,14 @@ def main() -> None:
             "calibrate-gaze",
             "check-starts",
             "diagnose-backward",
+            "prepare-backward-corrections",
+            "train-backward-pair",
         ),
     )
     for name in ("root", "replay", "initial", "upstream", "teacher"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--course", choices=tuple(COURSES), default="heads")
+    parser.add_argument("--diagnosis-root", type=Path)
     args = parser.parse_args()
     args.course = COURSES[args.course]
     {
@@ -1103,6 +1329,8 @@ def main() -> None:
         "calibrate-gaze": calibrate_gaze,
         "check-starts": check_starts,
         "diagnose-backward": diagnose_backward,
+        "prepare-backward-corrections": prepare_backward_corrections,
+        "train-backward-pair": run_backward_pair,
     }[args.stage](args)
 
 
