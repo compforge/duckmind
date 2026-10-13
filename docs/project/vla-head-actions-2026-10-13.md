@@ -129,3 +129,27 @@ episode/global float64统计与6个zero processor张量相等，权重/数据SHA
 | 新上下文审查 | 发现平均误差与smoke gate风险，已修正；剩余需实际产物验证 |
 | 最便宜区分实验 | 同初态不同文本/同噪声的首个chunk + 短闭环，区分文本启动与姿态维持 |
 | 耗时与GPU | prepare 使用 ONNX CPU 与 MuJoCo 渲染；正式峰值显存待原生日志 |
+
+## 2026-10-13 04:28 UTC 阶段记录
+
+smoke实际完成2次更新（原生training_step=2），六任务各完整执行10ticks且稳定；
+严格判据False符合短轨迹定义。baseline和zero各36条已完成，正式训练已开始并保存step500。
+当前没有final结果，不能声称已学会新动作或发生训练后遗忘；源文件哈希检查仍一致。
+
+| 任务 | baseline任务通过 / 稳定 | zero任务通过 / 稳定 |
+|---|---|---|
+| stand | 1/6 / 2/6 | 3/6 / 6/6 |
+| look_left | 0/6 / 0/6 | 0/6 / 0/6 |
+| look_right | 0/6 / 1/6 | 0/6 / 0/6 |
+| look_up | 0/6 / 1/6 | 0/6 / 3/6 |
+| look_down | 0/6 / 6/6 | 3/6 / 6/6 |
+| forward（12秒） | 0/6 / 4/6 | 0/6 / 0/6 |
+
+两组权重SHA均为`4f5e7dca40aa806de5c1aa5bd3b5fe489f1263679ce1c3afad49e10bd6e71936`。
+每行6条仍只是3body×2措辞。零更新就出现能力变化，证明不能把final相对baseline的全部差值
+归因于参数学习。保持既定流程，不因为这个预先设计的对照结果更改预算或判据。
+
+当前完整日志快照1206行/78392字符无Traceback，step10 loss0.997、step530 loss0.076，
+记录的mem_gb约2.33；只是优化过程，不代替闭环指标。后续保存的checkpoint以实际training_step为准。
+训练集12个chunk中，静态任务在20tick后的persistence误差很小，也说明离线拟合可被维持姿态
+捷径满足，仍需同初态文本启动和完整任务验收。
