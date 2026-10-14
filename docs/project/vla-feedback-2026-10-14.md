@@ -39,3 +39,56 @@ E1同时改变观测频率、动作块执行位置（总取第0步）及flow采�
 新增diagnose-feedback编排及run-feedback-curriculum.sh。工件位于devbox
 /srv/duckmind-training/v23-owner/run。完成后独立CPU重算质量、动作索引、配对输入、
 实际processor、模型/源码/数据hash和全日志，填写ml-debug form并更新PR5，不自动合并。
+
+## 完成结果
+
+冻结代码069d16e0d1a9167eb1c24f606d08b3a2eed2e292；launcher578291/Python578293。
+run.stage=complete、exit0，42条轨迹（40main+2smoke），实际4795次推理、0优化更新，
+总耗时约1460秒。两组E5全部数值轨迹与v21精确复现，独立审核还复算了metric JSON与判据。
+
+| 模型与执行跨度 | 严格后退成功↑ | 全程稳定↑ | 原话成功↑ | 旧同义说法成功↑ |
+|---|---:|---:|---:|---:|
+| control E1 | 2/10 | 9/10 | 2/5 | 0/5 |
+| control E5 对照 | 1/10 | 6/10 | 1/5 | 0/5 |
+| mixed E1 | 1/10 | 10/10 | 1/5 | 0/5 |
+| mixed E5 对照 | 0/10 | 7/10 | 0/5 | 0/5 |
+
+control成功对应E1的741/742原话，E5仅742原话；mixed仅E1的742原话通过。
+两组E1都少了3次失稳，但各只多1次严格任务成功。每组旧同义说法都稳定5/5却成功0/5。
+因此“执行跨度影响稳定性”和“语言条件下产生正确后退动作”必须分别解决。
+这只是固定五个已用身体初态、旧措辞、一个训练seed下的描述结果，不代表总体成功率显著提高。
+
+control body700原话E5在114tick失稳，E1在151tick失稳且终点yaw更差；不能把更长存活的
+终点位移当作更好步态。独立审核保存每对共同前缀长度的位移与最大heading，避免时长混淆。
+推理中位数E5约235/258ms、E1约255/256ms；均超过各自100/20ms控制窗口。
+E1主验收每模型约553/569秒，E5约126/139秒；CUDA峰值allocated约1.26GB，非全GPU占用。
+本轮不能部署为50Hz实时推理，也没有测异步推理。
+
+## 独立审核与竞争解释
+
+完整187行日志、42轨迹、4795调用、20对首chunk、12有效processor统计张量、
+24源码/20checkpoint/6dataset/3外部文件hash通过审核。全部实际模型输入为黑图；
+每tick执行动作对应chunk索引；previous_target按14实际关节核验，缺失mouth单独处理。
+本地fix/lint/test通过：17passed、2skipped；shell语法检查通过。
+
+实际安装LeRobot0.6.2的predict_action_chunk与select_action复用同一生成函数；reset仅清动作队列。
+动作标签从当前帧开始、teacher接管时重建last_action、有效归一化均未发现具体错配。
+原生loss先切实际15动作维再按有效时刻归一，不能用旧版padding稀释解释当前结果。
+这些检查排除了所查范围的具体错误，不是对整个训练栈的无缺陷证明。
+
+另有CPU状态尺度分析，仅覆盖当时已完整的control-E5/mixed-E5/control-E1共30条轨迹，
+对照原后退教师2000帧与纠偏1000帧。gravity_z的std约0.000791；明显失稳前的标准化值可
+超过教师范围，但最大的值已经伴随实际倾斜。该现象不证明归一化导致摔倒，不据此改epsilon。
+15条旧同义说法均稳定、gravity_z标准化绝对值<0.83，却全失败；小std不能统一解释语言失败。
+
+## 后续研究决策
+
+保留E1作为诊断线索，不替换现有运行配置或宣称平替教师。当前有两条相互独立的排查线：
+原话下的身体闭环仍有方向/恢复误差；同义说法则常退化为稳定但没有完成任务。
+下一步优先用已保存轨迹比较相同初态下原话/同义说法的动作演化，以及失稳前的动作差分，
+再决定做语言覆盖对照还是恢复入口单任务拟合。单纯继续堆普通纠偏数据缺少可区分的依据。
+以上是建议，未自动启动下一轮训练、推理或部署。
+
+完整证据在/srv/duckmind-training/v23-owner：independent-feedback-audit.json/md、
+independent-feedback-ml-debug-form.md、independent-state-scale.json/md；run保存每条原始trace与输入。
+旧v22源码snapshot与此前所有模型、失败轨迹继续保留。PR5不自动合并。
