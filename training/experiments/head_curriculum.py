@@ -571,8 +571,14 @@ def prepare_data(args: argparse.Namespace, numeric: list[dict]) -> None:
 
 
 def evaluate(
-    args: argparse.Namespace, checkpoint: Path, phase: str, *, smoke: bool = False
+    args: argparse.Namespace,
+    checkpoint: Path,
+    phase: str,
+    *,
+    smoke: bool = False,
+    execute_steps: int = E,
 ) -> None:
+    assert 1 <= execute_steps <= H
     course = args.course
     root = args.root
     out = root / phase
@@ -580,6 +586,7 @@ def evaluate(
     reference = args.replay if phase == "baseline" else root / "dataset"
     report = {
         "phase": phase,
+        "execute_steps": execute_steps,
         "stage": "started",
         "trials": [],
         "invalid_starts": [],
@@ -679,7 +686,7 @@ def evaluate(
                             if not sim.metrics()["stable"]:
                                 reason = "unstable"
                                 break
-                            if tick % E == 0:
+                            if tick % execute_steps == 0:
                                 state, _ = sim.observe()
                                 prior = sim.previous_target()
                                 torch.manual_seed(seed * 10000 + tick)
@@ -696,7 +703,7 @@ def evaluate(
                                 ]:
                                     saved[k].append(value)
                                 assert chunk.shape == (H, 15) and np.isfinite(chunk).all()
-                            action = chunk[tick % E]
+                            action = chunk[tick % execute_steps]
                             if np.any(np.abs(action) > np.pi):
                                 reason = "invalid_target"
                                 break
@@ -1580,6 +1587,126 @@ def diagnose_correction_fit(args: argparse.Namespace) -> None:
         write(root / "report.json", report)
 
 
+def diagnose_feedback(args: argparse.Namespace) -> None:
+    """Compare execution horizons on fixed checkpoints without optimizer updates.
+
+    spec: hold model, normalization, initial state and common-tick flow seeds fixed.
+    why: E1 also changes chunk offset and sampling frequency; it is not pure feedback isolation.
+    link: docs/project/vla-feedback-2026-10-14.md
+    """
+    root, source = args.root, args.replay.parent
+    root.mkdir(parents=True, exist_ok=False)
+    (root / "run.pid").write_text(str(os.getpid()))
+    started = time.perf_counter()
+    witness = source_witness()
+    audit = json.loads((source / "data-audit.json").read_text())
+    assert (source / "run.exit-code").read_text().strip() == "0"
+    assert all(sha256(Path(p)) == h for p, h in audit["dataset_sha256"].items())
+    (root / "dataset").symlink_to(args.replay, target_is_directory=True)
+    shutil.copy2(source / "data-audit.json", root / "data-audit.json")
+    checkpoints = {
+        arm: source / f"model-{arm}/checkpoints/001000/pretrained_model"
+        for arm in ("control", "mixed")
+    }
+    checkpoint_hashes = {
+        str(p): sha256(p)
+        for checkpoint in checkpoints.values()
+        for p in checkpoint.rglob("*")
+        if p.is_file()
+    }
+    cfg = {
+        "optimizer_updates": 0,
+        "maximum_inference_calls": 4944,
+        "main_rollouts": 40,
+        "smoke_rollouts": 2,
+        "max_ticks": 200,
+        "bodies": [700, 730, 740, 741, 742],
+        "execute_steps": [5, 1],
+        "horizon": H,
+        "physics_paused": True,
+        "fresh_holdout": False,
+        "argv": sys.argv,
+        "source_files": witness,
+        "checkpoint_files": checkpoint_hashes,
+        "dataset_sha256": audit["dataset_sha256"],
+    }
+    write(root / "config.json", cfg)
+    note(
+        root,
+        "# v23 execution-horizon comparison\n"
+        "SHOULD: identical state/prior/physics at reset and common-tick noise seeds.\n"
+        "SHOULD: E5 numeric traces reproduce v21; images in Trace are not model inputs.\n"
+        "SHOULD: 0 updates, <=4944 inference calls, 40 main +2 smoke rollouts.\n"
+        "E1 changes state feedback, chunk offset and flow sampling frequency together.\n",
+    )
+    course = replace(args.course, tasks=("backward",), eval_seeds=tuple(cfg["bodies"]))
+    summary = {"stage": "started", "phases": [], "optimizer_updates": 0}
+    try:
+        for execute in (5, 1):
+            phase = f"smoke-e{execute}"
+            (root / "run.stage").write_text(phase)
+            args.course = replace(course, eval_seeds=(700,))
+            evaluate(args, checkpoints["mixed"], phase, smoke=True, execute_steps=execute)
+            smoke = json.loads((root / phase / "report.json").read_text())
+            assert all(row["stable"] for row in smoke["trials"])
+        args.course = course
+        for execute in (5, 1):
+            for arm, checkpoint in checkpoints.items():
+                phase = f"{arm}-e{execute}"
+                (root / "run.stage").write_text(phase)
+                torch.cuda.reset_peak_memory_stats()
+                phase_started = time.perf_counter()
+                evaluate(args, checkpoint, phase, execute_steps=execute)
+                report = json.loads((root / phase / "report.json").read_text())
+                assert report["eligible_cases"] == 10 and not report["invalid_starts"]
+                if execute == 5:
+                    # Keep E5 an exact numerical reproduction before interpreting E1.
+                    for row in report["trials"]:
+                        for suffix in (".npz", "-inputs.npz"):
+                            with np.load(root / phase / (row["id"] + suffix)) as new:
+                                with np.load(
+                                    source / (arm + "-backward") / (row["id"] + suffix)
+                                ) as old:
+                                    for key in new.files:
+                                        if key not in ("image", "latency_s"):
+                                            np.testing.assert_array_equal(new[key], old[key])
+                summary["phases"].append(
+                    {
+                        "phase": phase,
+                        "accepted": sum(r["quality"]["accepted"] for r in report["trials"]),
+                        "stable": sum(r["stable"] for r in report["trials"]),
+                        "denominator": 10,
+                        "elapsed_s": time.perf_counter() - phase_started,
+                        "gpu_peak_bytes": torch.cuda.max_memory_allocated(),
+                        "e5_reproduced": execute == 5,
+                    }
+                )
+                write(root / "report.json", summary)
+                note(root, f"Completed {phase}: {summary['phases'][-1]}")
+        phases = ["smoke-e5", "smoke-e1", "control-e5", "mixed-e5", "control-e1", "mixed-e1"]
+        calls = 0
+        for phase in phases:
+            report = json.loads((root / phase / "report.json").read_text())
+            calls += len(report["fit_train_only"])
+            for path in (root / phase).glob("*-inputs.npz"):
+                with np.load(path) as inputs:
+                    calls += len(inputs["tick"])
+        assert calls <= cfg["maximum_inference_calls"]
+        assert witness == source_witness()
+        assert all(sha256(Path(p)) == h for p, h in checkpoint_hashes.items())
+        assert all(sha256(Path(p)) == h for p, h in audit["dataset_sha256"].items())
+        summary.update(
+            stage="complete", inference_calls=calls, elapsed_s=time.perf_counter() - started
+        )
+        write(root / "report.json", summary)
+        (root / "run.stage").write_text("complete")
+        (root / "run.exit-code").write_text("0")
+        note(root, f"## Complete\n{summary}\nPhysics paused; no real-time claim.")
+    except BaseException:
+        (root / "run.exit-code").write_text("1")
+        raise
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1591,6 +1718,7 @@ def main() -> None:
             "check-starts",
             "diagnose-backward",
             "diagnose-correction-fit",
+            "diagnose-feedback",
             "prepare-backward-corrections",
             "finalize-backward-preparation",
             "train-backward-pair",
@@ -1609,6 +1737,7 @@ def main() -> None:
         "check-starts": check_starts,
         "diagnose-backward": diagnose_backward,
         "diagnose-correction-fit": diagnose_correction_fit,
+        "diagnose-feedback": diagnose_feedback,
         "prepare-backward-corrections": prepare_backward_corrections,
         "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
