@@ -1337,6 +1337,249 @@ def run_backward_pair(args: argparse.Namespace) -> None:
         raise
 
 
+def diagnose_correction_fit(args: argparse.Namespace) -> None:
+    """Compare decoded predictions on the exact v21 training states, with no updates.
+
+    spec: pair state, text, target, normalization and flow noise across checkpoints.
+    link: docs/project/vla-correction-fit-2026-10-14.md
+    """
+    root, source = args.root, args.replay.parent
+    root.mkdir(parents=True, exist_ok=False)
+    (root / "run.pid").write_text(str(os.getpid()))
+    witness = source_witness()
+    audit = json.loads((source / "data-audit.json").read_text())
+    pair = json.loads((source / "pair-config.json").read_text())
+    assert (source / "run.exit-code").read_text().strip() == "0"
+    assert len(audit["episodes"]) == 134 and audit["frames"] == 31400
+    assert all(sha256(Path(p)) == value for p, value in audit["dataset_sha256"].items())
+    old_ids = pair["control_episodes"]
+    correction_ids = sorted(set(pair["mixed_episodes"]) - set(old_ids))
+    assert len(old_ids) == 10 and correction_ids == list(range(129, 134))
+    checkpoints = {
+        "zero": source / "zero-checkpoint",
+        "control": source / "model-control/checkpoints/001000/pretrained_model",
+        "mixed": source / "model-mixed/checkpoints/001000/pretrained_model",
+    }
+    model_hashes = {name: sha256(path / "model.safetensors") for name, path in checkpoints.items()}
+    ds = dataset(args.replay, chunks=True)
+    ticks = (0, 20, 60, 100, 140, 180)
+    offsets = np.cumsum([0] + [e["frames"] for e in audit["episodes"]])
+    original_root = Path(pair["paths"]["replay"]).parent
+    original_report = json.loads((original_root / "teacher/report.json").read_text())
+    original_rows = [
+        r
+        for r in original_report["episodes"]
+        if r["name"] == "backward" and r["quality"]["accepted"]
+    ]
+    correction_report = json.loads((source / "teacher/report.json").read_text())
+    correction_rows = [r for r in correction_report["candidates"] if r["quality"]["accepted"]]
+    raw_paths = {
+        **{
+            episode: original_root / "teacher" / (row["id"] + ".npz")
+            for episode, row in zip(old_ids, original_rows, strict=True)
+        },
+        **{
+            episode: source / "teacher" / (row["id"] + ".npz")
+            for episode, row in zip(correction_ids, correction_rows, strict=True)
+        },
+    }
+    raw_hashes = {str(path): sha256(path) for path in raw_paths.values()}
+    samples, states, targets, images = [], [], [], []
+    for episode in old_ids + correction_ids:
+        assert audit["episodes"][episode]["family"] == "backward"
+        assert audit["episodes"][episode]["frames"] == 200
+        with np.load(raw_paths[episode]) as raw:
+            raw_state = raw["state"].copy()
+            raw_prior = raw["previous_target"].copy()
+            raw_action = raw["action"].copy()
+        np.testing.assert_array_equal(raw_prior[1:], raw_action[:-1])
+        expected_text = (
+            SELECTED["backward"].texts[old_ids.index(episode) % 2]
+            if episode in old_ids
+            else SELECTED["backward"].texts[correction_ids.index(episode) % 2]
+        )
+        for tick in ticks:
+            item = ds[int(offsets[episode]) + tick]
+            assert int(item["episode_index"]) == episode
+            assert int(item["frame_index"]) == tick and not item["action_is_pad"].any()
+            assert not item[IMAGE_KEY].any()
+            state, target = item["observation.state"].numpy(), item["action"].numpy()
+            assert state.shape == (51,) and target.shape == (H, 15)
+            np.testing.assert_array_equal(state[:36], raw_state[tick])
+            np.testing.assert_array_equal(state[36:], raw_prior[tick])
+            np.testing.assert_array_equal(target, raw_action[tick : tick + H])
+            assert item["task"] == expected_text
+            samples.append(
+                {
+                    "episode": episode,
+                    "tick": tick,
+                    "text": item["task"],
+                    "group": "correction" if episode in correction_ids else "original",
+                    "period": "early" if tick < 60 else "late",
+                    "noise_seeds": [22000000 + episode * 1000 + tick * 2 + j for j in range(2)],
+                }
+            )
+            states.append(state)
+            targets.append(target)
+            images.append(BLACK.copy())
+    states, targets, images = np.asarray(states), np.asarray(targets), np.asarray(images)
+    np.savez_compressed(root / "inputs.npz", state=states, target=targets, image=images)
+    leg_indices = [i for i, name in enumerate(JOINT_NAMES) if name.startswith(("left_", "right_"))]
+    assert len(leg_indices) == 10
+    report = {
+        "stage": "started",
+        "optimizer_updates": 0,
+        "physics_rollouts": 0,
+        "argv": sys.argv,
+        "source_files": witness,
+        "samples": samples,
+        "model_sha256": model_hashes,
+        "raw_sha256": raw_hashes,
+        "dataset_sha256": audit["dataset_sha256"],
+        "input_sha256": sha256(root / "inputs.npz"),
+        "leg_indices": leg_indices,
+        "inference_budget": 543,
+        "inference_calls": 0,
+        "arms": {},
+    }
+    note(
+        root,
+        "# Correction-state fitting diagnosis\n"
+        "SHOULD: 0 updates/rollouts; "
+        "15 episodes × 6 ticks × 2 noises × 3 models + 3 repeats = 543 calls.\n"
+        "SHOULD: identical state, stored text, black image, noise and targets across models.\n"
+        "Training-state fitting only; overlapping corrections from two bodies are not holdout.",
+    )
+    try:
+        for arm, path in checkpoints.items():
+            (root / "run.stage").write_text(arm)
+            stats = processor_audit(path, args.replay)
+            model = SmolPolicy(path)
+            native = model.preprocess(
+                {
+                    "observation.state": torch.from_numpy(states[0].copy()),
+                    IMAGE_KEY: torch.from_numpy(images[0].copy()).permute(2, 0, 1).float() / 255,
+                    "task": samples[0]["text"],
+                }
+            )
+            np.savez_compressed(
+                root / f"{arm}-native-input.npz",
+                **{k: v.cpu().numpy() for k, v in native.items() if isinstance(v, torch.Tensor)},
+            )
+            predictions, latencies, rows = [], [], []
+            arm_report = {"checkpoint": str(path), "processors": stats, "rows": rows}
+            report["arms"][arm] = arm_report
+            try:
+                for sample_id, sample in enumerate(samples):
+                    state, target, image = states[sample_id], targets[sample_id], images[sample_id]
+                    for noise in sample["noise_seeds"]:
+                        torch.manual_seed(noise)
+                        start = time.perf_counter()
+                        chunk = model.predict(sample["text"], state[:36], image, state[36:])
+                        elapsed = time.perf_counter() - start
+                        report["inference_calls"] += 1
+                        assert chunk.shape == (H, 15) and np.isfinite(chunk).all()
+                        predictions.append(chunk)
+                        latencies.append(elapsed)
+                        if len(predictions) == 1:
+                            torch.manual_seed(noise)
+                            repeat = model.predict(sample["text"], state[:36], image, state[36:])
+                            report["inference_calls"] += 1
+                            np.savez_compressed(
+                                root / f"{arm}-smoke.npz", first=chunk, repeated=repeat
+                            )
+                            np.testing.assert_array_equal(chunk, repeat)
+                            arm_report["same_input_smoke"] = "exact"
+                        error = (chunk - target) ** 2
+                        persistence_error = (state[None, 36:] - target) ** 2
+                        row = {
+                            "sample_id": sample_id,
+                            "noise_seed": noise,
+                            "latency_s": elapsed,
+                        }
+                        for name, count in (("first", 1), ("executed5", E), ("chunk", H)):
+                            row[name + "_per_joint"] = error[:count].mean(0).tolist()
+                            row[name + "_persistence_per_joint"] = (
+                                persistence_error[:count].mean(0).tolist()
+                            )
+                            row[name + "_mse"] = float(error[:count].mean())
+                            row[name + "_legs_mse"] = float(error[:count, leg_indices].mean())
+                            row[name + "_persistence_mse"] = float(persistence_error[:count].mean())
+                            row[name + "_persistence_legs_mse"] = float(
+                                persistence_error[:count, leg_indices].mean()
+                            )
+                        rows.append(row)
+                    if sample["tick"] == ticks[-1]:
+                        note(
+                            root,
+                            f"{arm}: episode{sample['episode']}; {len(rows)}/180 predictions",
+                        )
+                        write(root / "report.json", report)
+            finally:
+                np.savez_compressed(
+                    root / f"{arm}-predictions.npz", prediction=predictions, latency_s=latencies
+                )
+                del model
+                torch.cuda.empty_cache()
+            arm_report["prediction_sha256"] = sha256(root / f"{arm}-predictions.npz")
+            arm_report["summary"] = {}
+            for group in ("original", "correction"):
+                for period in ("early", "late"):
+                    selected = [
+                        row
+                        for row in rows
+                        if samples[row["sample_id"]]["group"] == group
+                        and samples[row["sample_id"]]["period"] == period
+                    ]
+                    arm_report["summary"][group + "_" + period] = {
+                        "predictions": len(selected),
+                        **{
+                            key: float(np.mean([row[key] for row in selected]))
+                            for key in selected[0]
+                            if key.endswith("mse")
+                        },
+                    }
+            arm_report["per_episode"] = {
+                str(episode): {
+                    key: float(
+                        np.mean(
+                            [
+                                row[key]
+                                for row in rows
+                                if samples[row["sample_id"]]["episode"] == episode
+                            ]
+                        )
+                    )
+                    for key in rows[0]
+                    if key.endswith("mse")
+                }
+                for episode in old_ids + correction_ids
+            }
+            write(root / "report.json", report)
+        assert report["inference_calls"] == 543
+        assert source_witness() == witness
+        assert all(sha256(Path(p)) == value for p, value in raw_hashes.items())
+        assert all(sha256(Path(p)) == value for p, value in audit["dataset_sha256"].items())
+        assert all(
+            sha256(checkpoints[name] / "model.safetensors") == value
+            for name, value in model_hashes.items()
+        )
+        assert sha256(root / "inputs.npz") == report["input_sha256"]
+        report["stage"] = "complete"
+        (root / "run.stage").write_text("complete")
+        (root / "run.exit-code").write_text("0")
+        note(
+            root,
+            "## Complete\n543 calls, zero updates/rollouts. Decoded MSE is not physical success.",
+        )
+    except BaseException:
+        report["stage"] = "failed"
+        (root / "run.exit-code").write_text("1")
+        raise
+    finally:
+        write(root / "report.json", report)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1347,6 +1590,7 @@ def main() -> None:
             "calibrate-gaze",
             "check-starts",
             "diagnose-backward",
+            "diagnose-correction-fit",
             "prepare-backward-corrections",
             "finalize-backward-preparation",
             "train-backward-pair",
@@ -1364,6 +1608,7 @@ def main() -> None:
         "calibrate-gaze": calibrate_gaze,
         "check-starts": check_starts,
         "diagnose-backward": diagnose_backward,
+        "diagnose-correction-fit": diagnose_correction_fit,
         "prepare-backward-corrections": prepare_backward_corrections,
         "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
