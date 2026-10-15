@@ -577,6 +577,7 @@ def evaluate(
     *,
     smoke: bool = False,
     execute_steps: int = E,
+    texts: dict[str, list[tuple[str, str]]] | None = None,
 ) -> None:
     assert 1 <= execute_steps <= H
     course = args.course
@@ -634,16 +635,29 @@ def evaluate(
             samples, predictions, targets, persistence, strict=True
         )
     ]
+    language_cases = (
+        texts
+        if texts is not None
+        else {
+            name: (
+                [("trained", SELECTED[name].texts[0])]
+                if smoke
+                else [("trained", SELECTED[name].texts[0]), ("unseen", course.unseen[name])]
+            )
+            for name in course.tasks
+        }
+    )
+    assert set(language_cases) == set(course.tasks)
+    for cases in language_cases.values():
+        assert cases and len({label for label, _ in cases}) == len(cases)
+        assert all(label.replace("-", "").isalnum() for label, _ in cases)
+    seeds = course.eval_seeds[:1] if smoke else course.eval_seeds
     sim = Simulation(args.upstream, args.teacher)
     try:
-        for seed in course.eval_seeds[:1] if smoke else course.eval_seeds:
+        for seed in seeds:
             for name in course.tasks:
                 task = SELECTED[name]
-                for language, text in (
-                    [("trained", task.texts[0])]
-                    if smoke
-                    else [("trained", task.texts[0]), ("unseen", course.unseen[name])]
-                ):
+                for language, text in language_cases[name]:
                     identity = f"{seed}-{name}-{language}"
                     try:
                         preparation = sim.prepare(task, seed)
@@ -743,11 +757,13 @@ def evaluate(
                         f"{phase} {identity}: ticks={row['ticks']} "
                         f"accepted={quality['accepted']} stable={row['stable']}",
                     )
-        report["scheduled_cases"] = len(course.tasks) * (1 if smoke else len(course.eval_seeds) * 2)
+        report["scheduled_cases"] = len(seeds) * sum(
+            len(cases) for cases in language_cases.values()
+        )
         report["eligible_cases"] = len(report["trials"])
         assert report["scheduled_cases"] == len(report["trials"]) + len(report["invalid_starts"])
         if smoke:
-            assert len(report["trials"]) == len(course.tasks)
+            assert len(report["trials"]) == report["scheduled_cases"]
             assert all(r["ticks"] == 10 and r["reason"] == "completed" for r in report["trials"]), (
                 report["trials"]
             )
@@ -1926,6 +1942,338 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
         write(root / "report.json", report)
 
 
+LANGUAGE_TEXTS = ("向后走", "往后退一点", "朝身后退着走", "向后迈步", "往身后走", "往后退步")
+LANGUAGE_EVAL = [
+    ("original", "向后走"),
+    ("augmented", "朝身后退着走"),
+    ("fresh-a", "向身后迈几步"),
+    ("fresh-b", "往后方走一段"),
+]
+
+
+def prepare_language_pair(args: argparse.Namespace) -> None:
+    """Pair native dataset replicas; change only backward task strings.
+
+    spec: both arms share source-frame exposure and physical normalization.
+    link: docs/project/vla-language-coverage-2026-10-15.md
+    """
+    from collections import Counter
+
+    from lerobot.datasets.dataset_tools import merge_datasets, modify_tasks
+    from lerobot.datasets.io_utils import write_stats
+    from lerobot.datasets.sampler import EpisodeAwareSampler
+
+    root = args.root
+    root.mkdir(parents=True, exist_ok=False)
+    assert shutil.disk_usage(root).free > 15 * 2**30
+    source = dataset(args.replay)
+    original = json.loads((args.replay.parent / "data-audit.json").read_text())["episodes"]
+    assert source.num_episodes == len(original) == 134 and source.num_frames == 31400
+    source_hashes = {str(p): sha256(p) for p in args.replay.rglob("*") if p.is_file()}
+    backward = [i for i, e in enumerate(original) if e["family"] == "backward"]
+    assert len(backward) == 15
+    replay = []
+    for family in HEAD_TASKS + MOTION_TASKS:
+        if family != "backward":
+            chosen = [i for i, e in enumerate(original) if e["family"] == family][:2]
+            assert len(chosen) == 2 and all(original[i]["frames"] == 200 for i in chosen)
+            replay.extend(chosen)
+    selected = sorted(backward + replay)
+    episodes = [r * 134 + i for r in range(6) for i in selected]
+    assert len(episodes) == 210
+    config = {
+        "source_files": source_witness(),
+        "source_dataset_sha256": source_hashes,
+        "initial_sha256": sha256(args.initial / "model.safetensors"),
+        "external_sha256": {
+            str(p): sha256(p)
+            for p in (
+                args.teacher,
+                args.upstream / "scripts/infer_policy.py",
+                args.upstream / "src/mjlab_microduck/robot/microduck/scene.xml",
+                *[p for p in args.initial.iterdir() if p.is_file()],
+            )
+        },
+        "argv": sys.argv,
+        "train_texts": LANGUAGE_TEXTS,
+        "eval_texts": LANGUAGE_EVAL,
+        "eval_bodies": [730, 760, 761],
+        "selected_source_episodes": selected,
+        "selected_episodes": episodes,
+        "max_updates": 2004,
+        "formal_steps_per_arm": 1000,
+        "discarded_smoke_per_arm": 2,
+        "batch_size": 8,
+        "optimizer_seed": 42,
+        "state_dim": 51,
+        "horizon": H,
+        "execute_steps": E,
+        "physics_paused": True,
+    }
+    write(root / "language-config.json", config)
+    note(
+        root,
+        "# v25 language coverage pair\n"
+        "SHOULD: identical numeric data, native sampling and effective normalization; "
+        "only backward text changes.\n"
+        "SHOULD: each arm discards 2 smoke updates and restarts from the same initial "
+        "weight for 1000 updates.\n"
+        "SHOULD: 22 scheduled main physics trials per model, including old-task "
+        "regression; no visual or real-time claim.",
+    )
+    copies = []
+    for replica in range(6):
+        path = root / "replicas" / f"source-{replica}"
+        shutil.copytree(args.replay, path)
+        copies.append(dataset(path))
+    control = root / "dataset-control"
+    merge_datasets(
+        copies,
+        "duckmind/language-control",
+        output_dir=control,
+        concatenate_data=False,
+        concatenate_videos=False,
+    )
+    augmented = root / "dataset-augmented"
+    shutil.copytree(control, augmented)
+    modify_tasks(
+        dataset(augmented),
+        episode_tasks={
+            r * 134 + i: text for r, text in enumerate(LANGUAGE_TEXTS) for i in backward
+        },
+    )
+    # modify_tasks rewrites parquet in place, so discard its stale hf_dataset object.
+    # Repair bookkeeping stats too; physical episode values are unchanged by replication.
+    source_arrays = {
+        k: np.asarray(source.hf_dataset[k])
+        for k in ("observation.state", "action", "timestamp", "frame_index", "task_index")
+    }
+    offset = np.cumsum([0] + [e["frames"] for e in original])
+    arm_arrays, audit_rows, hashes = {}, {}, {}
+    for arm in ("control", "augmented"):
+        path = root / ("dataset-" + arm)
+        ds = dataset(path)
+        assert ds.num_episodes == 804 and ds.num_frames == 188400
+        arrays = {
+            k: np.asarray(ds.hf_dataset[k]) for k in (*source_arrays, "episode_index", "index")
+        }
+        arm_arrays[arm] = arrays
+        bookkeeping, declared = [], []
+        for replica in range(6):
+            for i, episode in enumerate(original):
+                ep = replica * 134 + i
+                start, stop = replica * 31400 + offset[i], replica * 31400 + offset[i + 1]
+                for key in ("observation.state", "action", "timestamp", "frame_index"):
+                    np.testing.assert_array_equal(
+                        arrays[key][start:stop], source_arrays[key][offset[i] : offset[i + 1]]
+                    )
+                assert np.all(arrays["episode_index"][start:stop] == ep)
+                np.testing.assert_array_equal(arrays["index"][start:stop], np.arange(start, stop))
+                ids = np.unique(arrays["task_index"][start:stop])
+                assert len(ids) == 1
+                text = str(ds.meta.tasks.iloc[int(ids[0])].name)
+                expected = (
+                    LANGUAGE_TEXTS[replica]
+                    if arm == "augmented" and i in backward
+                    else episode["text"]
+                )
+                assert text == expected
+                declared.append({**episode, "text": text, "source_episode": i, "replica": replica})
+                bookkeeping.append(
+                    {
+                        k: arrays[k][start:stop].reshape(-1, 1)
+                        for k in ("index", "episode_index", "task_index")
+                    }
+                )
+        precise_numeric_stats(path, ds, bookkeeping)
+        # Six identical copies have exactly the original physical distribution. Preserve
+        # canonical float64 stats rather than introducing aggregation roundoff near zero.
+        for key in ("observation.state", "action", "timestamp", "frame_index", IMAGE_KEY):
+            ds.meta.stats[key] = {
+                k: np.array(v, copy=True) for k, v in source.meta.stats[key].items()
+            }
+            ds.meta.stats[key]["count"] *= 6
+        write_stats(ds.meta.stats, path)
+        processor_audit(args.initial, path)
+        audit_rows[arm] = declared
+        hashes[arm] = {str(p): sha256(p) for p in path.rglob("*") if p.is_file()}
+        note(
+            root,
+            f"{arm}: 804 replicas /188400 frames; full numerical and resolved-text audit passed.",
+        )
+    for key in arm_arrays["control"]:
+        if key != "task_index":
+            np.testing.assert_array_equal(arm_arrays["control"][key], arm_arrays["augmented"][key])
+
+    def video_hashes(path: Path) -> list[str]:
+        return sorted(sha256(p) for p in path.rglob("*.mp4"))
+
+    assert video_hashes(control) == video_hashes(augmented) == sorted(video_hashes(args.replay) * 6)
+    # A native sampler reconstruction is evidence of planned exposure, not a captured
+    # training hook. Its seed/epoch are independent of the model's diffusion RNG.
+    sampling = {}
+    for arm in ("control", "augmented"):
+        ds = LeRobotDataset(
+            "duckmind/" + arm,
+            root=root / ("dataset-" + arm),
+            episodes=episodes,
+            video_backend="pyav",
+        )
+        sampler = EpisodeAwareSampler(
+            ds.meta.episodes["dataset_from_index"],
+            ds.meta.episodes["dataset_to_index"],
+            episode_indices_to_use=ds.episodes,
+            shuffle=True,
+            seed=42,
+            absolute_to_relative_idx=ds.absolute_to_relative_idx,
+        )
+        relative = list(sampler)[:8000]
+        global_indices = np.asarray(ds.hf_dataset["index"])[relative].astype(int)
+        ep_indices = np.asarray(ds.hf_dataset["episode_index"])[relative].astype(int)
+        tasks = [audit_rows[arm][i]["text"] for i in ep_indices]
+        sampling[arm] = {
+            "global_indices": global_indices.tolist(),
+            "text_counts": dict(Counter(tasks)),
+            "family_counts": dict(Counter(audit_rows[arm][i]["family"] for i in ep_indices)),
+        }
+    assert sampling["control"]["global_indices"] == sampling["augmented"]["global_indices"]
+    write(root / "sampling.json", sampling)
+    # evaluate uses a canonical physical dataset for processors and train-only probes.
+    (root / "dataset").symlink_to(control.name)
+    write(
+        root / "data-audit.json",
+        {
+            "episodes": audit_rows["control"],
+            "frames": 188400,
+            "arm_episodes": audit_rows,
+            "dataset_sha256": hashes,
+            "source_dataset_sha256": source_hashes,
+            "independent_source_episodes": 134,
+            "selected_source_episodes": 35,
+        },
+    )
+    raw = root / "teacher"
+    raw.mkdir()
+    report = []
+    sim = Simulation(args.upstream, args.teacher)
+    try:
+        for seed in config["eval_bodies"]:
+            task = SELECTED["backward"]
+            preparation = sim.prepare(task, seed)
+            initial_witness(root, sim, seed, task, preparation)
+            sim.command(task)
+            trace = expert_rollout(sim, 200)
+            trace.save(raw / f"{seed}-backward.npz")
+            quality = outcome(task, trace.metrics, 200, trace_gaze(sim, trace.physics))
+            report.append({"body": seed, "ticks": len(trace.actions), "quality": quality})
+            write(raw / "report.json", report)
+            note(
+                root,
+                f"Teacher body={seed}: ticks={len(trace.actions)}, accepted={quality['accepted']}",
+            )
+        assert all(row["quality"]["accepted"] for row in report), report
+    finally:
+        sim.close()
+    assert all(sha256(Path(p)) == value for p, value in source_hashes.items())
+    (root / "prepare.exit-code").write_text("0")
+    note(
+        root,
+        "Preparation complete. Zero model inference and zero optimizer updates; "
+        "independent preflight required before training.",
+    )
+
+
+def run_language_pair(args: argparse.Namespace) -> None:
+    root, course = args.root, args.course
+    cfg = json.loads((root / "language-config.json").read_text())
+    audit = json.loads((root / "data-audit.json").read_text())
+    assert cfg["source_files"] == source_witness()
+    assert cfg["initial_sha256"] == sha256(args.initial / "model.safetensors")
+    assert all(sha256(Path(p)) == value for p, value in cfg["external_sha256"].items())
+    assert (root / "prepare.exit-code").read_text().strip() == "0"
+    assert (
+        json.loads((root.parent / "independent-preflight-audit.json").read_text())["stage"]
+        == "passed"
+    )
+    for hashes in audit["dataset_sha256"].values():
+        assert all(sha256(Path(p)) == value for p, value in hashes.items())
+    assert not (root / "run.pid").exists()
+    (root / "run.pid").write_text(str(os.getpid()))
+
+    def stage(name: str) -> None:
+        (root / "run.stage").write_text(name)
+        note(root, "## " + name)
+
+    def train(arm: str, steps: int, label: str) -> Path:
+        command = [
+            sys.executable,
+            "-c",
+            "from duckmind_training.train import main; main()",
+            "--dataset",
+            str(root / ("dataset-" + arm)),
+            "--model",
+            str(args.initial),
+            "--output",
+            str(root / label),
+            "--steps",
+            str(steps),
+            "--batch-size",
+            "8",
+            "--chunk-size",
+            str(H),
+            "--episodes",
+            *map(str, cfg["selected_episodes"]),
+        ]
+        note(root, f"Native trainer argv: {command!r}")
+        subprocess.run(command, check=True)
+        checkpoint = root / label / "checkpoints" / f"{steps:06d}" / "pretrained_model"
+        processor_audit(checkpoint, root / ("dataset-" + arm))
+        return checkpoint
+
+    def physical(checkpoint: Path, label: str) -> None:
+        args.course = replace(course, tasks=("backward",), eval_seeds=tuple(cfg["eval_bodies"]))
+        evaluate(args, checkpoint, label + "-backward", texts={"backward": LANGUAGE_EVAL})
+        regression = tuple(t for t in HEAD_TASKS + MOTION_TASKS if t != "backward")
+        args.course = replace(course, tasks=regression, eval_seeds=(730,))
+        evaluate(
+            args,
+            checkpoint,
+            label + "-regression",
+            texts={name: [("original", SELECTED[name].texts[0])] for name in regression},
+        )
+
+    try:
+        for arm in ("control", "augmented"):
+            stage("smoke-" + arm)
+            checkpoint = train(arm, 2, "smoke-" + arm)
+            args.course = replace(course, tasks=("backward",), eval_seeds=(730,))
+            evaluate(
+                args,
+                checkpoint,
+                "smoke-eval-" + arm,
+                smoke=True,
+                texts={"backward": [("augmented", LANGUAGE_TEXTS[2])]},
+            )
+        stage("baseline")
+        physical(args.initial, "baseline")
+        for arm in ("control", "augmented"):
+            stage("train-" + arm)
+            checkpoint = train(arm, 1000, "model-" + arm)
+            stage("evaluate-" + arm)
+            physical(checkpoint, arm)
+        stage("verify")
+        assert all(sha256(Path(p)) == value for p, value in cfg["external_sha256"].items())
+        assert cfg["source_files"] == source_witness()
+        assert cfg["initial_sha256"] == sha256(args.initial / "model.safetensors")
+        for hashes in audit["dataset_sha256"].values():
+            assert all(sha256(Path(p)) == value for p, value in hashes.items())
+        stage("complete")
+        (root / "run.exit-code").write_text("0")
+    except BaseException:
+        (root / "run.exit-code").write_text("1")
+        raise
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1942,6 +2290,8 @@ def main() -> None:
             "prepare-backward-corrections",
             "finalize-backward-preparation",
             "train-backward-pair",
+            "prepare-language-pair",
+            "train-language-pair",
         ),
     )
     for name in ("root", "replay", "initial", "upstream", "teacher"):
@@ -1962,6 +2312,8 @@ def main() -> None:
         "prepare-backward-corrections": prepare_backward_corrections,
         "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
+        "prepare-language-pair": prepare_language_pair,
+        "train-language-pair": run_language_pair,
     }[args.stage](args)
 
 
