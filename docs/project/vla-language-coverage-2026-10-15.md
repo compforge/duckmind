@@ -38,3 +38,7 @@ v24 在固定教师状态和采样噪声下发现，旧说法“朝身后退着�
 独立preflight已通过：parent目录 `independent-preflight-audit.json/.md/.py` 保存96071项检查（72.48秒），完整数值、episode/global统计、有效processor和源哈希通过；真实CPU DataLoader每组前16个anchor通过，全部210 selected episode末尾H10 padding通过。独立旧库存扫描788个JSON，760/761身份字段及两句fresh文本均无命中。扫描清单和哈希已保存；源episode数量不是统计独立性。
 
 唯一launcher PID1100371，进度以 `run/run.stage`、`run/run.log`、`run/run.exit-code` 为准。正式结果待填，不把准备或冒烟通过当作学会后退。没有重启自动跟进。
+
+20:41 中途快照：两组 native step2 和155个optimizer参数step均为2；真实num_workers2链路通过。两条smoke均完整稳定10tick，实际观测/previous_target/两个预测块与10个执行目标逐项对齐；六有效归一化张量一致。`independent-interim-audit.json/.md` 的134项检查通过（passed-snapshot）。smoke严格任务不通过是因为只跑10tick，不满足200tick门槛，不能当学会或训练失败。
+
+初始模型快照仅前两条：身体730原话99tick失稳；旧增广说法200tick稳定，但未达到后退任务判据。两条已独立重算。此时正式训练尚未开始；编排将在baseline完整后分别从同一初始checkpoint训练两组，结果仍待完成，不能从局部baseline推断文本增广收益。
