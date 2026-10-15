@@ -23,4 +23,18 @@ v24 在固定教师状态和采样噪声下发现，旧说法“朝身后退着�
 
 ## 运行记录
 
-入口：`training/experiments/head_curriculum.py prepare-language-pair / train-language-pair`，启动脚本 `run-language-curriculum.sh`。工件目录 `/srv/duckmind-training/v25-owner/run`。先准备并独立审计，再启动唯一训练进程。当前尚未启动训练，结果待实际运行填写。
+入口：`training/experiments/head_curriculum.py prepare-language-pair / train-language-pair`，启动脚本 `run-language-curriculum.sh`。工件目录 `/srv/duckmind-training/v25-owner/run`。先准备并独立审计，再启动唯一训练进程。代码提交 `c9989ce95b47fc565c5c3c4f0b651000ca95cdc0`；冻结 driver SHA256 `6b9364a7898f9a97103c00709850b3ea0aa74d71e5084b6de90e6ea90bcbebcd`。准备进程1076120已退出0；2026-10-15 20:37（Asia/Shanghai）启动唯一训练编排进程1100371，当前实际进入smoke-control。正式两组1000步会在smoke和baseline之后自动开始，尚不能称训练完成。
+
+
+准备阶段的证据：
+
+- 两组各804副本/188400帧，所有非 task 数值相等，视频SHA多重集合相等；源数据未修改。源episode计数不是统计独立样本数，尤其纠偏窗口来自重叠状态。
+- 教师730/760/761各完整200tick且严格通过（3/3），后退进展分别约0.570/0.560/0.537m；不使用这些校准轨迹训练。
+- 采样顺序重建的8000anchors两组相同，其中后退3407（42.59%）；增广六说法曝光分别550、556、561、618、573、549。其余4593为十类回放。
+- 库存初查542份旧报告/config/audit的结构化seed/body字段未命中760/761；独立复核会记录完整扫描范围。
+- 本机training lint/test通过（17 passed, 2 skipped），managed提交同时验证policy lint/test。devloop提交推送成功后仍因旧action-chunks路径postcheck退出1，已核实remote SHA一致。
+- native merge尝试加载torchcodec时报告缺少libavutil，随后成功回退pyav；显式数据读入也用pyav。准备无学生推理、无优化更新。
+
+独立preflight已通过：parent目录 `independent-preflight-audit.json/.md/.py` 保存96071项检查（72.48秒），完整数值、episode/global统计、有效processor和源哈希通过；真实CPU DataLoader每组前16个anchor通过，全部210 selected episode末尾H10 padding通过。独立旧库存扫描788个JSON，760/761身份字段及两句fresh文本均无命中。扫描清单和哈希已保存；源episode数量不是统计独立性。
+
+唯一launcher PID1100371，进度以 `run/run.stage`、`run/run.log`、`run/run.exit-code` 为准。正式结果待填，不把准备或冒烟通过当作学会后退。没有重启自动跟进。
