@@ -1707,6 +1707,225 @@ def diagnose_feedback(args: argparse.Namespace) -> None:
         raise
 
 
+def diagnose_text_noise(args: argparse.Namespace) -> None:
+    """Measure text and flow-noise sensitivity on frozen teacher observations.
+
+    spec: every text/noise pair uses identical state, actual prior and black image.
+    why: separate paraphrase dispersion from wrong-goal separation; neither proves motion.
+    link: docs/project/vla-text-noise-2026-10-15.md
+    """
+    root, source = args.root, args.replay.parent
+    root.mkdir(parents=True, exist_ok=False)
+    (root / "run.pid").write_text(str(os.getpid()))
+    started = time.perf_counter()
+    texts = ("向后走", "往后退一点", "朝身后退着走", "向后迈步", "往身后走", "保持站立", "向前走")
+    roles = (
+        "trained",
+        "trained",
+        "old-development",
+        "new-diagnostic",
+        "new-diagnostic",
+        "stand-control",
+        "forward-control",
+    )
+    seeds = (24001, 24002, 24003, 24004)
+    pair = json.loads((source / "pair-config.json").read_text())
+    teacher_root = Path(pair["paths"]["replay"]).parent / "teacher"
+    raw_paths = [
+        teacher_root / (name + ".npz")
+        for name in ("train-700-backward", "calibration-720-backward")
+    ]
+    checkpoints = {
+        arm: source / f"model-{arm}/checkpoints/001000/pretrained_model"
+        for arm in ("control", "mixed")
+    }
+    hashes = {str(p): sha256(p) for p in raw_paths}
+    hashes.update(
+        {str(p): sha256(p) for c in checkpoints.values() for p in c.rglob("*") if p.is_file()}
+    )
+    witness = source_witness()
+    samples, states, priors, targets = [], [], [], []
+    for path in raw_paths:
+        with np.load(path) as raw:
+            np.testing.assert_array_equal(raw["previous_target"][1:], raw["action"][:-1])
+            for tick in (0, 60, 140):
+                samples.append({"episode": path.stem, "tick": tick})
+                states.append(raw["state"][tick])
+                priors.append(raw["previous_target"][tick])
+                targets.append(raw["action"][tick : tick + H])
+    states, priors, targets = np.asarray(states), np.asarray(priors), np.asarray(targets)
+    assert states.shape == (6, 36) and priors.shape == (6, 15) and targets.shape == (6, H, 15)
+    np.savez_compressed(
+        root / "observations.npz", state=states, previous_target=priors, target=targets, image=BLACK
+    )
+    cfg = dict(
+        texts=texts,
+        roles=roles,
+        noise_seeds=seeds,
+        samples=samples,
+        horizon=H,
+        maximum_inference_calls=338,
+        optimizer_updates=0,
+        physics_steps=0,
+        source_files=witness,
+        input_files=hashes,
+        argv=sys.argv,
+        processors={a: processor_audit(c, args.replay) for a, c in checkpoints.items()},
+    )
+    write(root / "config.json", cfg)
+    note(
+        root,
+        "# v24 frozen observation text/noise comparison\n"
+        "SHOULD: 336 grid predictions +2 exact repeats; 0 updates and 0 physics steps.\n"
+        "SHOULD: same state/prior/black image and pre-call RNG across texts and arms.\n"
+        "SHOULD: finite H10x15 physical targets, unchanged source/checkpoints/raw.\n"
+        "Teacher backward error is meaningful only for first five texts; "
+        "controls measure separation.",
+    )
+    report = dict(stage="started", inference_calls=0, optimizer_updates=0, arms={})
+    legs = [i for i, name in enumerate(JOINT_NAMES) if name.startswith(("left_", "right_"))]
+    assert len(legs) == 10
+    try:
+        for arm, checkpoint in checkpoints.items():
+            (root / "run.stage").write_text(arm)
+            model = SmolPolicy(checkpoint)
+            torch.cuda.reset_peak_memory_stats()
+            arm_started = time.perf_counter()
+            chunks, native, rng, rows = [], {}, {}, []
+            for sample, (state, prior) in enumerate(zip(states, priors, strict=True)):
+                for text_index, text in enumerate(texts):
+                    # Same native preprocessing as predict; no sampling here.
+                    batch = model.preprocess(
+                        {
+                            "observation.state": torch.from_numpy(
+                                policy_state(state, prior, include_previous_target=True).astype(
+                                    np.float32
+                                )
+                            ),
+                            IMAGE_KEY: torch.from_numpy(BLACK.copy()).permute(2, 0, 1).float()
+                            / 255,
+                            "task": text,
+                        }
+                    )
+                    for key, value in batch.items():
+                        if isinstance(value, torch.Tensor):
+                            native[f"{sample}:{text_index}:{key}"] = value.detach().cpu().numpy()
+                            if (
+                                text_index
+                                and key.startswith("observation.")
+                                and "language" not in key
+                            ):
+                                np.testing.assert_array_equal(
+                                    native[f"{sample}:0:{key}"],
+                                    native[f"{sample}:{text_index}:{key}"],
+                                )
+                    for noise in seeds:
+                        torch.manual_seed(noise)
+                        identity = f"{sample}:{text_index}:{noise}"
+                        rng[identity + ":cpu"] = torch.get_rng_state().numpy()
+                        rng[identity + ":cuda"] = torch.cuda.get_rng_state().cpu().numpy()
+                        call_started = time.perf_counter()
+                        chunk = model.predict(text, state, BLACK, prior)
+                        latency = time.perf_counter() - call_started
+                        rng[identity + ":cpu-after"] = torch.get_rng_state().numpy()
+                        rng[identity + ":cuda-after"] = torch.cuda.get_rng_state().cpu().numpy()
+                        report["inference_calls"] += 1
+                        assert chunk.shape == (H, 15) and np.isfinite(chunk).all()
+                        if not chunks:
+                            torch.manual_seed(noise)
+                            repeat = model.predict(text, state, BLACK, prior)
+                            report["inference_calls"] += 1
+                            np.savez_compressed(
+                                root / f"{arm}-smoke.npz", prediction=chunk, repeat=repeat
+                            )
+                            np.testing.assert_array_equal(chunk, repeat)
+                            note(root, f"{arm}: same-input smoke exact; shape H10x15 finite.")
+                        chunks.append(chunk)
+                        rows.append(
+                            dict(
+                                sample=sample,
+                                text_index=text_index,
+                                noise_seed=noise,
+                                latency_s=latency,
+                            )
+                        )
+                        # Persist each completed call, including partially completed states.
+                        np.savez_compressed(root / f"{arm}-predictions.npz", prediction=chunks)
+                        np.savez_compressed(root / f"{arm}-native.npz", **native)
+                        np.savez_compressed(root / f"{arm}-rng.npz", **rng)
+                        write(root / f"{arm}-rows.json", rows)
+                note(
+                    root,
+                    f"{arm}: completed {sample + 1}/6 states; calls={report['inference_calls']}",
+                )
+            cube = np.asarray(chunks, dtype=np.float64).reshape(6, 7, 4, H, 15)[..., legs]
+            target = targets[..., legs].astype(np.float64)
+            prior = priors[..., legs].astype(np.float64)
+            metrics = []
+            for sample in range(6):
+                for text_index in range(7):
+                    pred = cube[sample, text_index]
+                    for horizon in (E, H):
+                        p = pred[:, :horizon]
+                        # Average unordered noise pairs, preserving state and text identity.
+                        variance = [
+                            np.mean((p[a] - p[b]) ** 2) for a in range(4) for b in range(a + 1, 4)
+                        ]
+                        metrics.append(
+                            dict(
+                                sample=sample,
+                                text_index=text_index,
+                                horizon=horizon,
+                                within_noise_rms_rad=float(np.sqrt(np.mean(variance))),
+                                paired_text_rms_rad=float(
+                                    np.sqrt(np.mean((p - cube[sample, 0, :, :horizon]) ** 2))
+                                ),
+                                teacher_mse_rad2=float(
+                                    np.mean((p - target[sample, None, :horizon]) ** 2)
+                                )
+                                if text_index < 5
+                                else None,
+                                persistence_mse_rad2=float(
+                                    np.mean((prior[sample] - target[sample, :horizon]) ** 2)
+                                ),
+                                target_offset_rms_rad=float(
+                                    np.sqrt(np.mean((p - prior[sample]) ** 2))
+                                ),
+                            )
+                        )
+            report["arms"][arm] = dict(
+                metrics=metrics,
+                elapsed_s=time.perf_counter() - arm_started,
+                gpu_peak_bytes=torch.cuda.max_memory_allocated(),
+                median_latency_s=float(np.median([r["latency_s"] for r in rows])),
+            )
+            write(root / "report.json", report)
+            note(
+                root,
+                f"{arm}: offline grid complete, elapsed={report['arms'][arm]['elapsed_s']:.2f}s",
+            )
+            del model
+            torch.cuda.empty_cache()
+        assert report["inference_calls"] == 338
+        assert source_witness() == witness
+        assert all(sha256(Path(p)) == digest for p, digest in hashes.items())
+        report.update(stage="complete", elapsed_s=time.perf_counter() - started)
+        (root / "run.stage").write_text("complete")
+        (root / "run.exit-code").write_text("0")
+        note(
+            root,
+            "## Complete\n338 inference calls; 0 updates; 0 physics steps.\n"
+            "Full predictions, native tensors and RNG states saved; "
+            "per-state metrics in report.json.",
+        )
+    except BaseException:
+        report["stage"] = "failed"
+        (root / "run.exit-code").write_text("1")
+        raise
+    finally:
+        write(root / "report.json", report)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1719,6 +1938,7 @@ def main() -> None:
             "diagnose-backward",
             "diagnose-correction-fit",
             "diagnose-feedback",
+            "diagnose-text-noise",
             "prepare-backward-corrections",
             "finalize-backward-preparation",
             "train-backward-pair",
@@ -1738,6 +1958,7 @@ def main() -> None:
         "diagnose-backward": diagnose_backward,
         "diagnose-correction-fit": diagnose_correction_fit,
         "diagnose-feedback": diagnose_feedback,
+        "diagnose-text-noise": diagnose_text_noise,
         "prepare-backward-corrections": prepare_backward_corrections,
         "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
