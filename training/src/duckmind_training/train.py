@@ -27,7 +27,10 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--chunk-size", type=int, choices=range(1, 101), default=50)
+    parser.add_argument("--save-freq", type=int, default=500)
     args = parser.parse_args()
+    if args.save_freq < 1:
+        parser.error("--save-freq must be positive")
     if args.output.exists():
         raise FileExistsError(args.output)
     metadata = json.loads((args.dataset / "meta/info.json").read_text())
@@ -81,7 +84,7 @@ def main() -> None:
             num_workers=2,
             env_eval_freq=0,
             log_freq=10,
-            save_freq=min(args.steps, 500),
+            save_freq=min(args.steps, args.save_freq),
             seed=42,
         )
     )

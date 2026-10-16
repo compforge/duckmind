@@ -578,6 +578,7 @@ def evaluate(
     smoke: bool = False,
     execute_steps: int = E,
     texts: dict[str, list[tuple[str, str]]] | None = None,
+    forward_steps: int = 600,
 ) -> None:
     assert 1 <= execute_steps <= H
     course = args.course
@@ -693,7 +694,7 @@ def evaluate(
                         "latency_s": [],
                     }
                     identity = f"{seed}-{name}-{language}"
-                    steps = 10 if smoke else 600 if name == "forward" else 200
+                    steps = 10 if smoke else forward_steps if name == "forward" else 200
                     reason = "completed"
                     try:
                         for tick in range(steps):
@@ -1734,27 +1735,64 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
     root.mkdir(parents=True, exist_ok=False)
     (root / "run.pid").write_text(str(os.getpid()))
     started = time.perf_counter()
-    texts = ("向后走", "往后退一点", "朝身后退着走", "向后迈步", "往身后走", "保持站立", "向前走")
-    roles = (
-        "trained",
-        "trained",
-        "old-development",
-        "new-diagnostic",
-        "new-diagnostic",
-        "stand-control",
-        "forward-control",
-    )
-    seeds = (24001, 24002, 24003, 24004)
+    language_fit = args.stage == "diagnose-language-fit"
     pair = json.loads((source / "pair-config.json").read_text())
     teacher_root = Path(pair["paths"]["replay"]).parent / "teacher"
-    raw_paths = [
-        teacher_root / (name + ".npz")
-        for name in ("train-700-backward", "calibration-720-backward")
-    ]
-    checkpoints = {
-        arm: source / f"model-{arm}/checkpoints/001000/pretrained_model"
-        for arm in ("control", "mixed")
-    }
+    if language_fit:
+        # spec: all six v25 training paraphrases share the same teacher target.
+        # link: docs/project/vla-small-curriculum-2026-10-16.md
+        assert args.diagnosis_root is not None
+        assert (args.diagnosis_root / "run.exit-code").read_text().strip() == "0"
+        texts = (*LANGUAGE_TEXTS, "保持站立", "向前走")
+        roles = (*(["v25-trained"] * 6), "stand-control", "forward-control")
+        seeds, ticks = (26001, 26002), (0, 20, 60, 140)
+        accepted = [
+            r
+            for r in json.loads((source / "teacher/report.json").read_text())["candidates"]
+            if r["quality"]["accepted"]
+        ]
+        raw_paths = [
+            teacher_root / "train-700-backward.npz",
+            teacher_root / "train-702-backward.npz",
+            source / "teacher" / (accepted[0]["id"] + ".npz"),
+        ]
+        checkpoints = {
+            "baseline": args.initial,
+            "augmented": args.diagnosis_root
+            / "model-augmented/checkpoints/001000/pretrained_model",
+        }
+    else:
+        texts = (
+            "向后走",
+            "往后退一点",
+            "朝身后退着走",
+            "向后迈步",
+            "往身后走",
+            "保持站立",
+            "向前走",
+        )
+        roles = (
+            "trained",
+            "trained",
+            "old-development",
+            "new-diagnostic",
+            "new-diagnostic",
+            "stand-control",
+            "forward-control",
+        )
+        seeds, ticks = (24001, 24002, 24003, 24004), (0, 60, 140)
+        raw_paths = [
+            teacher_root / (name + ".npz")
+            for name in ("train-700-backward", "calibration-720-backward")
+        ]
+        checkpoints = {
+            arm: source / f"model-{arm}/checkpoints/001000/pretrained_model"
+            for arm in ("control", "mixed")
+        }
+    sample_count = len(raw_paths) * len(ticks)
+    text_count, noise_count = len(texts), len(seeds)
+    backward_count = text_count - 2
+    call_budget = len(checkpoints) * (sample_count * text_count * noise_count + 1)
     hashes = {str(p): sha256(p) for p in raw_paths}
     hashes.update(
         {str(p): sha256(p) for c in checkpoints.values() for p in c.rglob("*") if p.is_file()}
@@ -1764,13 +1802,24 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
     for path in raw_paths:
         with np.load(path) as raw:
             np.testing.assert_array_equal(raw["previous_target"][1:], raw["action"][:-1])
-            for tick in (0, 60, 140):
-                samples.append({"episode": path.stem, "tick": tick})
+            for tick in ticks:
+                samples.append(
+                    {
+                        "episode": path.stem,
+                        "tick": tick,
+                        "group": "original" if path.parent == teacher_root else "correction",
+                        "period": "startup" if tick < 60 else "sustained",
+                    }
+                )
                 states.append(raw["state"][tick])
                 priors.append(raw["previous_target"][tick])
                 targets.append(raw["action"][tick : tick + H])
     states, priors, targets = np.asarray(states), np.asarray(priors), np.asarray(targets)
-    assert states.shape == (6, 36) and priors.shape == (6, 15) and targets.shape == (6, H, 15)
+    assert (
+        states.shape == (sample_count, 36)
+        and priors.shape == (sample_count, 15)
+        and targets.shape == (sample_count, H, 15)
+    )
     np.savez_compressed(
         root / "observations.npz", state=states, previous_target=priors, target=targets, image=BLACK
     )
@@ -1780,7 +1829,7 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
         noise_seeds=seeds,
         samples=samples,
         horizon=H,
-        maximum_inference_calls=338,
+        maximum_inference_calls=call_budget,
         optimizer_updates=0,
         physics_steps=0,
         source_files=witness,
@@ -1791,11 +1840,11 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
     write(root / "config.json", cfg)
     note(
         root,
-        "# v24 frozen observation text/noise comparison\n"
-        "SHOULD: 336 grid predictions +2 exact repeats; 0 updates and 0 physics steps.\n"
+        f"# Frozen observation language fitting: {args.stage}\n"
+        f"SHOULD: {call_budget} predictions including repeats; 0 updates and 0 physics steps.\n"
         "SHOULD: same state/prior/black image and pre-call RNG across texts and arms.\n"
         "SHOULD: finite H10x15 physical targets, unchanged source/checkpoints/raw.\n"
-        "Teacher backward error is meaningful only for first five texts; "
+        f"Teacher backward error is meaningful only for first {backward_count} texts; "
         "controls measure separation.",
     )
     report = dict(stage="started", inference_calls=0, optimizer_updates=0, arms={})
@@ -1872,20 +1921,25 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
                         write(root / f"{arm}-rows.json", rows)
                 note(
                     root,
-                    f"{arm}: completed {sample + 1}/6 states; calls={report['inference_calls']}",
+                    f"{arm}: completed {sample + 1}/{sample_count} states; "
+                    f"calls={report['inference_calls']}",
                 )
-            cube = np.asarray(chunks, dtype=np.float64).reshape(6, 7, 4, H, 15)[..., legs]
+            cube = np.asarray(chunks, dtype=np.float64).reshape(
+                sample_count, text_count, noise_count, H, 15
+            )[..., legs]
             target = targets[..., legs].astype(np.float64)
             prior = priors[..., legs].astype(np.float64)
             metrics = []
-            for sample in range(6):
-                for text_index in range(7):
+            for sample in range(sample_count):
+                for text_index in range(text_count):
                     pred = cube[sample, text_index]
                     for horizon in (E, H):
                         p = pred[:, :horizon]
                         # Average unordered noise pairs, preserving state and text identity.
                         variance = [
-                            np.mean((p[a] - p[b]) ** 2) for a in range(4) for b in range(a + 1, 4)
+                            np.mean((p[a] - p[b]) ** 2)
+                            for a in range(noise_count)
+                            for b in range(a + 1, noise_count)
                         ]
                         metrics.append(
                             dict(
@@ -1899,7 +1953,7 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
                                 teacher_mse_rad2=float(
                                     np.mean((p - target[sample, None, :horizon]) ** 2)
                                 )
-                                if text_index < 5
+                                if text_index < backward_count
                                 else None,
                                 persistence_mse_rad2=float(
                                     np.mean((prior[sample] - target[sample, :horizon]) ** 2)
@@ -1922,7 +1976,7 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
             )
             del model
             torch.cuda.empty_cache()
-        assert report["inference_calls"] == 338
+        assert report["inference_calls"] == call_budget
         assert source_witness() == witness
         assert all(sha256(Path(p)) == digest for p, digest in hashes.items())
         report.update(stage="complete", elapsed_s=time.perf_counter() - started)
@@ -1930,7 +1984,7 @@ def diagnose_text_noise(args: argparse.Namespace) -> None:
         (root / "run.exit-code").write_text("0")
         note(
             root,
-            "## Complete\n338 inference calls; 0 updates; 0 physics steps.\n"
+            f"## Complete\n{call_budget} inference calls; 0 updates; 0 physics steps.\n"
             "Full predictions, native tensors and RNG states saved; "
             "per-state metrics in report.json.",
         )
@@ -2274,6 +2328,282 @@ def run_language_pair(args: argparse.Namespace) -> None:
         raise
 
 
+SMALL_TEXTS = {
+    "stand": ("保持站立", "站好别动", "在原地站稳", "保持站姿", "站着保持平衡", "停在原地站好"),
+    "forward": ("向前走", "往前走一点", "朝前面走", "向前迈步", "往前方走", "往前走几步"),
+    "backward": LANGUAGE_TEXTS,
+}
+SMALL_COURSE = Curriculum(
+    "v27-small",
+    tuple(SMALL_TEXTS),
+    tuple(SMALL_TEXTS),
+    (700, 730),
+    (),
+    (700, 730, 770, 771),
+    {"stand": "请在这里站稳不动", "forward": "朝前方迈出几步", "backward": "朝后方迈出几步"},
+    4000,
+    0,
+    0,
+)
+
+
+def prepare_small(args: argparse.Namespace) -> None:
+    """Build six matched-reset trajectories and balanced language replicas.
+
+    spec: only teacher actions label training; all texts of one physical trajectory stay together.
+    why: this is a fitting diagnostic, not a broad replacement checkpoint.
+    link: docs/project/vla-small-curriculum-2026-10-16.md
+    """
+    root = args.root
+    root.mkdir(parents=True, exist_ok=False)
+    assert shutil.disk_usage(root).free > 12 * 2**30
+    (root / "teacher").mkdir()
+    cfg = {
+        "source_files": source_witness(),
+        "initial": str(args.initial),
+        "initial_sha256": sha256(args.initial / "model.safetensors"),
+        "teacher_sha256": sha256(args.teacher),
+        "external_sha256": {
+            str(p): sha256(p)
+            for p in (
+                args.teacher,
+                args.upstream / "scripts/infer_policy.py",
+                args.upstream / "src/mjlab_microduck/robot/microduck/scene.xml",
+                *[p for p in args.initial.iterdir() if p.is_file()],
+            )
+        },
+        "texts": SMALL_TEXTS,
+        "curriculum": asdict(SMALL_COURSE),
+        "budget_updates": 4002,
+        "normalization": "true small training dataset; zero-control changes stats only",
+        "argv": sys.argv,
+    }
+    write(root / "small-config.json", cfg)
+    note(
+        root,
+        "# v27 small language curriculum\n"
+        "SHOULD: six physical episodes, 36 language replicas, 7200 frames; shared resets.\n"
+        "SHOULD: 2 discarded smoke +4000 formal updates; native checkpoints every1000.\n"
+        "SHOULD: new true float64 stats, zero unchanged weights; black51/H10/E5.\n"
+        "Four seconds is the trained duration. No visual, realtime or broad capability claim.",
+    )
+    report = {"stage": "started", "episodes": []}
+    numeric = []
+    sim = Simulation(args.upstream, args.teacher)
+    try:
+        # No teacher screening of evaluation bodies: keep their student results honest.
+        for seed in SMALL_COURSE.train_seeds:
+            for name, texts in SMALL_TEXTS.items():
+                task = SELECTED[name]
+                preparation = sim.prepare(task, seed)
+                initial_witness(root, sim, seed, task, preparation)
+                sim.command(task)
+                trace = expert_rollout(sim, 200)
+                identity = f"train-{seed}-{name}"
+                trace.save(root / "teacher" / f"{identity}.npz")
+                gaze = trace_gaze(sim, trace.physics)
+                quality = outcome(task, trace.metrics, 200, gaze)
+                row = {
+                    "id": identity,
+                    "body": seed,
+                    "task": name,
+                    "quality": quality,
+                    "command": asdict(task),
+                    "ticks": len(trace.actions),
+                    "wrong_goals": {
+                        n: outcome(SELECTED[n], trace.metrics, 200, gaze)["accepted"]
+                        for n in SMALL_TEXTS
+                        if n != name
+                    },
+                }
+                report["episodes"].append(row)
+                write(root / "teacher/report.json", report)
+                note(root, f"Teacher {identity}: accepted={quality['accepted']}")
+                assert quality["accepted"] and not any(row["wrong_goals"].values()), row
+                states = policy_state(
+                    np.asarray(trace.states),
+                    np.asarray(trace.previous_targets),
+                    include_previous_target=True,
+                )
+                actions = np.asarray(trace.actions)
+                np.testing.assert_array_equal(states[1:, 36:], actions[:-1])
+                for text in texts:
+                    numeric.append(
+                        {
+                            "observation.state": states,
+                            "action": actions,
+                            "texts": [text] * 200,
+                            "family": name,
+                        }
+                    )
+    finally:
+        sim.close()
+    assert len(numeric) == 36
+    report["stage"] = "complete"
+    write(root / "teacher/report.json", report)
+    prepare_data(args, numeric)
+    assert source_witness() == cfg["source_files"]
+    (root / "prepare.exit-code").write_text("0")
+
+
+def small_fit(args: argparse.Namespace, checkpoint: Path, label: str) -> None:
+    """Every trained text, both bodies and six periods; fixed noise across paraphrases."""
+    root = args.root
+    out = root / (label + "-fit")
+    out.mkdir(exist_ok=False)
+    processor_audit(checkpoint, root / "dataset")
+    ds = dataset(root / "dataset", chunks=True)
+    model = SmolPolicy(checkpoint)
+    ticks = (0, 5, 10, 20, 60, 140)
+    legs = [i for i, n in enumerate(JOINT_NAMES) if n.startswith(("left_", "right_"))]
+    rows, predictions, states, targets = [], [], [], []
+    started = time.perf_counter()
+    try:
+        for episode in range(36):
+            physical = episode // 6
+            family = SMALL_COURSE.tasks[physical % 3]
+            for tick in ticks:
+                item = ds[episode * 200 + tick]
+                assert int(item["episode_index"]) == episode and not item["action_is_pad"].any()
+                assert item["task"] == SMALL_TEXTS[family][episode % 6]
+                state, target = item["observation.state"].numpy(), item["action"].numpy()
+                assert not item[IMAGE_KEY].any()
+                for noise in (27001, 27002):
+                    torch.manual_seed(noise)
+                    call_start = time.perf_counter()
+                    pred = model.predict(item["task"], state[:36], BLACK, state[36:])
+                    assert pred.shape == (H, 15) and np.isfinite(pred).all()
+                    predictions.append(pred)
+                    states.append(state)
+                    targets.append(target)
+                    rows.append(
+                        {
+                            "episode": episode,
+                            "physical_episode": physical,
+                            "task": family,
+                            "tick": tick,
+                            "text": item["task"],
+                            "noise": noise,
+                            "latency_s": time.perf_counter() - call_start,
+                            "leg_e5_mse": float(np.mean((pred[:E, legs] - target[:E, legs]) ** 2)),
+                            "leg_h10_mse": float(np.mean((pred[:, legs] - target[:, legs]) ** 2)),
+                            "persistence_leg_e5_mse": float(
+                                np.mean((state[36:][legs] - target[:E, legs]) ** 2)
+                            ),
+                        }
+                    )
+                # Preserve partial diagnostics on interruption, not only a final aggregate.
+                write(out / "rows.json", rows)
+                np.savez_compressed(
+                    out / "predictions.npz", prediction=predictions, state=states, target=targets
+                )
+        assert len(rows) == 432
+        write(
+            out / "report.json",
+            {
+                "stage": "complete",
+                "rows": rows,
+                "model_sha256": sha256(checkpoint / "model.safetensors"),
+                "calls": len(rows),
+                "training_states_only": True,
+                "elapsed_s": time.perf_counter() - started,
+            },
+        )
+        note(
+            root,
+            f"{label} fit:432 calls, {time.perf_counter() - started:.1f}s; teacher states only.",
+        )
+    finally:
+        del model
+        torch.cuda.empty_cache()
+
+
+def run_small(args: argparse.Namespace) -> None:
+    root = args.root
+    cfg = json.loads((root / "small-config.json").read_text())
+    audit = json.loads((root / "data-audit.json").read_text())
+    assert (root / "prepare.exit-code").read_text().strip() == "0"
+    assert cfg["source_files"] == source_witness()
+    assert all(sha256(Path(p)) == v for p, v in cfg["external_sha256"].items())
+    assert cfg["initial_sha256"] == sha256(args.initial / "model.safetensors")
+    assert all(sha256(Path(p)) == digest for p, digest in audit["dataset_sha256"].items())
+    assert not (root / "run.pid").exists()
+    (root / "run.pid").write_text(str(os.getpid()))
+
+    def stage(name: str) -> None:
+        (root / "run.stage").write_text(name)
+        note(root, f"## {name}")
+
+    def train(steps: int, label: str) -> Path:
+        command = [
+            sys.executable,
+            "-c",
+            "from duckmind_training.train import main; main()",
+            "--dataset",
+            str(root / "dataset"),
+            "--model",
+            str(args.initial),
+            "--output",
+            str(root / label),
+            "--steps",
+            str(steps),
+            "--batch-size",
+            "8",
+            "--chunk-size",
+            str(H),
+            "--save-freq",
+            "1000",
+        ]
+        note(root, f"Native trainer argv: {command!r}")
+        subprocess.run(command, check=True)
+        checkpoint = root / label / "checkpoints" / f"{steps:06d}" / "pretrained_model"
+        processor_audit(checkpoint, root / "dataset")
+        return checkpoint
+
+    def physical(checkpoint: Path, phase: str, *, final: bool = False, smoke: bool = False) -> None:
+        selected = argparse.Namespace(**vars(args))
+        selected.course = replace(
+            SMALL_COURSE,
+            eval_seeds=(SMALL_COURSE.eval_seeds if final else SMALL_COURSE.train_seeds),
+        )
+        texts = {n: [("original", t[0])] for n, t in SMALL_TEXTS.items()}
+        if final:
+            texts = {
+                n: [("original", t[0]), ("variant", t[-1]), ("unseen", SMALL_COURSE.unseen[n])]
+                for n, t in SMALL_TEXTS.items()
+            }
+        evaluate(selected, checkpoint, phase, smoke=smoke, texts=texts, forward_steps=200)
+
+    try:
+        stage("smoke-train")
+        smoke_checkpoint = train(2, "model-smoke")
+        stage("smoke-evaluate")
+        physical(smoke_checkpoint, "smoke", smoke=True)
+        stage("zero-fit")
+        small_fit(args, root / "zero-checkpoint", "zero")
+        stage("zero-evaluate")
+        physical(root / "zero-checkpoint", "zero-eval")
+        stage("train")
+        final = train(4000, "model")
+        for step in (1000, 2000, 4000):
+            checkpoint = root / "model/checkpoints" / f"{step:06d}" / "pretrained_model"
+            stage(f"fit-{step}")
+            small_fit(args, checkpoint, f"step-{step}")
+            stage(f"evaluate-{step}")
+            physical(checkpoint, f"step-{step}", final=step == 4000)
+        stage("verify")
+        assert source_witness() == cfg["source_files"]
+        assert all(sha256(Path(p)) == v for p, v in cfg["external_sha256"].items())
+        assert all(sha256(Path(p)) == digest for p, digest in audit["dataset_sha256"].items())
+        assert cfg["initial_sha256"] == sha256(args.initial / "model.safetensors")
+        assert final.exists()
+        stage("complete")
+        (root / "run.exit-code").write_text("0")
+    except BaseException:
+        (root / "run.exit-code").write_text("1")
+        raise
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2287,11 +2617,14 @@ def main() -> None:
             "diagnose-correction-fit",
             "diagnose-feedback",
             "diagnose-text-noise",
+            "diagnose-language-fit",
             "prepare-backward-corrections",
             "finalize-backward-preparation",
             "train-backward-pair",
             "prepare-language-pair",
             "train-language-pair",
+            "prepare-small",
+            "train-small",
         ),
     )
     for name in ("root", "replay", "initial", "upstream", "teacher"):
@@ -2299,7 +2632,9 @@ def main() -> None:
     parser.add_argument("--course", choices=tuple(COURSES), default="heads")
     parser.add_argument("--diagnosis-root", type=Path)
     args = parser.parse_args()
-    args.course = COURSES[args.course]
+    args.course = (
+        SMALL_COURSE if args.stage in ("prepare-small", "train-small") else COURSES[args.course]
+    )
     {
         "prepare": prepare,
         "train-evaluate": run,
@@ -2309,11 +2644,14 @@ def main() -> None:
         "diagnose-correction-fit": diagnose_correction_fit,
         "diagnose-feedback": diagnose_feedback,
         "diagnose-text-noise": diagnose_text_noise,
+        "diagnose-language-fit": diagnose_text_noise,
         "prepare-backward-corrections": prepare_backward_corrections,
         "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
         "prepare-language-pair": prepare_language_pair,
         "train-language-pair": run_language_pair,
+        "prepare-small": prepare_small,
+        "train-small": run_small,
     }[args.stage](args)
 
 
