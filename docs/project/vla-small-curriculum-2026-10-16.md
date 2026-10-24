@@ -61,3 +61,22 @@ v27准备已完成：6/6教师严格成功，错误目标无误通过；36ep/720
 2026-10-16 16:08（Asia/Shanghai）启动唯一launcher PID74446，run.pid已匹配，smoke完成2次实际更新，155个optimizer参数step均2；真实num_workers2通过。三任务各完整稳定10tick，实际输入/previous_target/chunk前5步与关节执行逐项吻合，独立smoke88checks通过。报告在owner `independent-smoke-audit.json/.md`。随后进入zero-fit；正式4000更新在zero-fit/zero-eval后自动开始，尚不能报正式完成。
 
 完整日志：`/srv/duckmind-training/v27-owner/run/run.log`。状态看同目录run.stage/run.exit-code，禁止重复启动。源码快照在owner/source-snapshot；当前仅smoke2更新已证实，总预算4002。代码与teacher/data冻结，不自动扩新实验或重新启用自动跟进。正式结果完成后仍需独立审核，不能从loss或smoke推断成功。
+
+## v27 完成与独立复核（2026-10-24）
+
+本次回读确认`run.stage=complete`、`run.exit-code=0`，原launcher已退出，没有重复训练。新独立CPU审计11,394项零不一致：57条物理轨迹、9894个实际执行目标、1983次实际输入、1728个离线预测；native smoke2+正式4000及155个optimizer参数step、各checkpoint有效processor、原始数据/模型/源码hash均一致。
+
+| 测试范围 | zero | step1000 | step2000 | step4000 |
+|---|---:|---:|---:|---:|
+| 相同两个训练初态、三任务原话，严格成功 | 2/6 | 3/6 | 4/6 | 4/6 |
+| 后退教师状态腿部E5 MSE（rad²） | .00203873 | .00118072 | .00058765 | .00033158 |
+
+最终扩大到4初态×3说法的结果：站立12/12、前进10/12、后退0/12。最终22/36与zero2/6的分母不同，不直接比较。两个训练初态11/18、新初态11/18，但新初态没有zero对照，且只有一个optimizerseed，不能当训练重复。
+
+后退必须拆开解释：8条训练说法中5条稳定后退0.364–0.576m，仅航向失败；另3条失稳。4条未见说法全部稳定但只移动1.74–2.24mm，未真正后退。前进的2条失败均为未见说法下的航向失败，仍完成200tick且稳定。
+
+后退离线误差下降83.7%，且低于persistence .0307403，但不足以代表闭环成功。432条fit探针是216个已见anchor×2flow noise，底层只有6条真实轨迹，不是全帧或泛化验收。前进最终MSE .000682685高于后退却闭环更好，跨任务MSE不能直接排序能力。
+
+物理验收仅4秒、黑图、同步暂停等待推理。推理中位数约0.25秒，高于E5的0.1秒执行窗口，尚不能按真实时间部署。
+
+独立证据：`/srv/duckmind-training/v27-owner/independent-final-audit.json/.md`与`ml-debug-form.md`。下一步是[v28同状态诊断](vla-state-deviation-2026-10-24.md)：先区分教师轨迹拟合、学生实际访问状态与动作块执行偏移的误差，再决定纠偏数据；不立即追加训练。

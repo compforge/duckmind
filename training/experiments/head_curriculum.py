@@ -2604,6 +2604,244 @@ def run_small(args: argparse.Namespace) -> None:
         raise
 
 
+def diagnose_state_deviation(args: argparse.Namespace) -> None:
+    """Compare student and teacher on exactly replayed, pre-action body states.
+
+    spec: queries never write motor targets or advance time; teacher labels use actual prior.
+    link: docs/project/vla-state-deviation-2026-10-24.md
+    """
+    from duckmind_training.contract import wire_positions
+
+    source, out = args.root, args.diagnosis_root
+    assert out is not None and not out.exists()
+    assert (source / "run.stage").read_text().strip() == "complete"
+    assert (source / "run.exit-code").read_text().strip() == "0"
+    out.mkdir(parents=True)
+    (out / "run.pid").write_text(str(os.getpid()))
+    checkpoint = source / "model/checkpoints/004000/pretrained_model"
+    cases = ((700, "backward"), (730, "backward"), (700, "forward"))
+    ticks = (0, 5, 10, 20, 40, 60, 80, 100)
+    query_ticks = {start + offset: start for start in ticks for offset in range(E)}
+    legs = [i for i, name in enumerate(JOINT_NAMES) if name.startswith(("left_", "right_"))]
+    cfg = json.loads((source / "small-config.json").read_text())
+    external = {str(args.teacher): sha256(args.teacher)}
+    assert external[str(args.teacher)] == cfg["teacher_sha256"]
+    external.update(
+        {
+            p: digest
+            for p, digest in cfg["external_sha256"].items()
+            if p.startswith(str(args.upstream))
+        }
+    )
+    assert all(sha256(Path(p)) == digest for p, digest in external.items())
+    paths = list(checkpoint.glob("*"))
+    for seed, name in cases:
+        for stem in (
+            source / "step-4000" / f"{seed}-{name}-original",
+            source / "teacher" / f"train-{seed}-{name}",
+        ):
+            paths.extend((stem.with_suffix(".npz"), stem.with_suffix(".json")))
+        paths.append(source / "step-4000" / f"{seed}-{name}-original-inputs.npz")
+    hashes = {str(p): sha256(p) for p in paths if p.is_file()}
+    report = {
+        "stage": "started",
+        "optimizer_updates": 0,
+        "calls": 0,
+        "cases": cases,
+        "ticks": ticks,
+        "rows": [],
+        "replays": [],
+        "source_files": source_witness(),
+        "input_sha256": hashes,
+        "external_sha256": external,
+        "processors": processor_audit(checkpoint, source / "dataset"),
+        "argv": sys.argv,
+    }
+    write(out / "report.json", report)
+    note(
+        out,
+        "# v28 state deviation\nSHOULD: 49 VLA calls; zero optimizer updates.\n"
+        "SHOULD: full physics/state/prior/metrics replay exact; same-input chunk exact.\n"
+        "Teacher labels are one-step queries, not demonstrated recovery or a takeover.\n"
+        "Teacher and learner states at equal tick can have different gait phases.\n"
+        "SHOULD: 240 same-state teacher queries over selected five-step execution blocks.",
+    )
+    sim = None
+    started = time.perf_counter()
+    try:
+        model = SmolPolicy(checkpoint)
+        sim = Simulation(args.upstream, args.teacher)
+        for seed, name in cases:
+            identity = f"{seed}-{name}"
+            task, text = SELECTED[name], SMALL_TEXTS[name][0]
+            saved = np.load(source / "step-4000" / f"{identity}-original-inputs.npz")
+            for path_kind in ("teacher", "learner"):
+                label = f"{identity}-{path_kind}"
+                (out / "run.stage").write_text(label)
+                stem = (
+                    source / "teacher" / f"train-{identity}"
+                    if path_kind == "teacher"
+                    else source / "step-4000" / f"{identity}-original"
+                )
+                raw = np.load(stem.with_suffix(".npz"))
+                metrics = json.loads(stem.with_suffix(".json").read_text())
+                sim.prepare(task, seed)
+                if path_kind == "teacher":
+                    sim.command(task)
+                trace = Trace()
+                trace.mark(sim)
+                probes = {
+                    k: []
+                    for k in (
+                        "tick",
+                        "state",
+                        "previous_target",
+                        "teacher_obs",
+                        "teacher_target",
+                        "chunk",
+                        "native_teacher_target",
+                    )
+                }
+                try:
+                    for tick, target in enumerate(raw["action"]):
+                        state, _ = sim.observe()
+                        prior = sim.previous_target()
+                        np.testing.assert_array_equal(state, raw["state"][tick])
+                        np.testing.assert_array_equal(prior, raw["previous_target"][tick])
+                        np.testing.assert_array_equal(
+                            sim.integration_state(), raw["integration_state"][tick]
+                        )
+                        assert sim.metrics() == metrics[tick]
+                        if tick in query_ticks:
+                            block = query_ticks[tick]
+                            offset = tick - block
+                            # Restore all expert fields modified by command/infer. No motor write.
+                            last = sim.expert.last_action.copy()
+                            command = sim.expert.command.copy()
+                            velocity = sim.expert.vel_cmd.copy()
+                            tail = tuple(sim.tail_speeds)
+                            assert sim.expert.standing_session is None
+                            assert sim.expert.ort_session is sim.expert.walking_session
+                            head = sim.expert.head_offset.copy()
+                            physics = sim.integration_state()
+                            native = np.full(15, np.nan, dtype=np.float32)
+                            if path_kind == "teacher":
+                                native = wire_positions(
+                                    sim.expert.default_pose
+                                    + sim.expert.infer() * sim.expert.action_scale
+                                )
+                                np.testing.assert_array_equal(native, target)
+                            sim.resume_teacher(task)
+                            teacher_obs = sim.expert.get_observations().copy()
+                            teacher_target = wire_positions(
+                                sim.expert.default_pose
+                                + sim.expert.infer() * sim.expert.action_scale
+                            )
+                            if path_kind == "teacher":
+                                # Inverse of float32 targets may round; native target remains exact.
+                                np.testing.assert_allclose(
+                                    teacher_target, native, rtol=0, atol=1e-6
+                                )
+                            sim.expert.last_action = last
+                            sim.expert.command[:] = command
+                            sim.expert.vel_cmd = velocity
+                            assert tuple(sim.tail_speeds) == tail
+                            sim.expert.head_offset[:] = head
+                            np.testing.assert_array_equal(sim.integration_state(), physics)
+                            np.testing.assert_array_equal(sim.previous_target(), prior)
+                            if offset == 0:
+                                torch.manual_seed(seed * 10000 + block)
+                                before = time.perf_counter()
+                                chunk = model.predict(text, state, BLACK, prior)
+                                latency = time.perf_counter() - before
+                                report["calls"] += 1
+                                assert chunk.shape == (H, 15) and np.isfinite(chunk).all()
+                                if report["calls"] == 1:
+                                    torch.manual_seed(seed * 10000 + block)
+                                    duplicate = model.predict(text, state, BLACK, prior)
+                                    report["calls"] += 1
+                                    np.testing.assert_array_equal(chunk, duplicate)
+                                if path_kind == "learner":
+                                    ix = int(np.flatnonzero(saved["tick"] == tick)[0])
+                                    np.testing.assert_array_equal(state, saved["state"][ix])
+                                    np.testing.assert_array_equal(
+                                        prior, saved["previous_target"][ix]
+                                    )
+                                    assert not saved["image"][ix].any()
+                                    np.testing.assert_array_equal(chunk, saved["chunk"][ix])
+                            for k, value in (
+                                ("tick", tick),
+                                ("state", state),
+                                ("previous_target", prior),
+                                ("teacher_obs", teacher_obs),
+                                ("teacher_target", teacher_target),
+                                ("chunk", chunk),
+                                ("native_teacher_target", native),
+                            ):
+                                probes[k].append(value)
+                            error = chunk[offset] - teacher_target
+                            report["rows"].append(
+                                {
+                                    "case": identity,
+                                    "path": path_kind,
+                                    "tick": tick,
+                                    "block": block,
+                                    "offset": offset,
+                                    "text": text,
+                                    "noise": seed * 10000 + block,
+                                    "leg_executed_mse_rad2": float(np.mean(error[legs] ** 2)),
+                                    "prior_mse_rad2": float(
+                                        np.mean((prior[legs] - teacher_target[legs]) ** 2)
+                                    ),
+                                    "joint_error_rad": error.tolist(),
+                                    "metrics": sim.metrics(),
+                                    "teacher_inverse_maxdiff": (
+                                        float(np.max(np.abs(native - teacher_target)))
+                                        if path_kind == "teacher"
+                                        else None
+                                    ),
+                                    "latency_s": latency,
+                                }
+                            )
+                            write(out / "report.json", report)
+                        trace.step(sim, None if path_kind == "teacher" else target)
+                    np.testing.assert_array_equal(trace.physics, raw["integration_state"])
+                    np.testing.assert_array_equal(trace.targets, raw["actuator_target"])
+                    np.testing.assert_array_equal(trace.actions, raw["action"])
+                    assert trace.metrics == metrics
+                    report["replays"].append(
+                        {"id": label, "ticks": len(trace.actions), "exact": True}
+                    )
+                    note(
+                        out,
+                        f"{label}: exact replay {len(trace.actions)} ticks, "
+                        f"{len(probes['tick'])} probes.",
+                    )
+                finally:
+                    trace.save(out / f"{label}-replay.npz")
+                    np.savez_compressed(out / f"{label}-probes.npz", **probes, image=BLACK)
+                    write(out / "report.json", report)
+        assert report["calls"] == 49 and len(report["rows"]) == 240
+        assert all(sha256(Path(p)) == digest for p, digest in hashes.items())
+        assert source_witness() == report["source_files"]
+        assert all(sha256(Path(p)) == digest for p, digest in external.items())
+        report.update(stage="complete", elapsed_s=time.perf_counter() - started)
+        write(out / "report.json", report)
+        note(
+            out,
+            f"Complete: {report['calls']} calls, six exact replays; zero training.\n"
+            "Errors on visited states are descriptive, not proof of a sole failure cause.",
+        )
+        (out / "run.stage").write_text("complete")
+        (out / "run.exit-code").write_text("0")
+    except BaseException:
+        (out / "run.exit-code").write_text("1")
+        raise
+    finally:
+        if sim is not None:
+            sim.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2618,6 +2856,7 @@ def main() -> None:
             "diagnose-feedback",
             "diagnose-text-noise",
             "diagnose-language-fit",
+            "diagnose-state-deviation",
             "prepare-backward-corrections",
             "finalize-backward-preparation",
             "train-backward-pair",
@@ -2645,6 +2884,7 @@ def main() -> None:
         "diagnose-feedback": diagnose_feedback,
         "diagnose-text-noise": diagnose_text_noise,
         "diagnose-language-fit": diagnose_text_noise,
+        "diagnose-state-deviation": diagnose_state_deviation,
         "prepare-backward-corrections": prepare_backward_corrections,
         "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
