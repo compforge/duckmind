@@ -2842,6 +2842,242 @@ def diagnose_state_deviation(args: argparse.Namespace) -> None:
             sim.close()
 
 
+def collect_early_recovery(args: argparse.Namespace) -> None:
+    """Verify recoverability before accepting expert suffixes as training candidates.
+
+    spec: preserve original heading; no prefix action is a demonstration label.
+    link: docs/project/vla-early-recovery-2026-10-24.md
+    """
+    source, out = args.root, args.diagnosis_root
+    assert out is not None and not out.exists()
+    cfg = json.loads((source / "small-config.json").read_text())
+    previous = source.parent.parent / "v28-owner/run/report.json"
+    witness = json.loads(previous.read_text())
+    assert witness["stage"] == "complete"
+    assert all(
+        sha256(Path(p)) == digest
+        for p, digest in witness["source_files"].items()
+        if "/src/" in p and p.endswith(".py")
+    )
+    assert all(sha256(Path(p)) == digest for p, digest in witness["external_sha256"].items())
+    assert sha256(args.teacher) == cfg["teacher_sha256"]
+    files = [previous]
+    for seed in (700, 730):
+        stem = source / "step-4000" / f"{seed}-backward-original"
+        files.extend((stem.with_suffix(".npz"), stem.with_suffix(".json")))
+        assert all(sha256(p) == witness["input_sha256"][str(p)] for p in files[-2:])
+    out.mkdir(parents=True)
+    (out / "run.pid").write_text(str(os.getpid()))
+    report = {
+        "stage": "started",
+        "optimizer_updates": 0,
+        "vla_calls": 0,
+        "controls": [],
+        "candidates": [],
+        "accepted": [],
+        "source_files": source_witness(),
+        "input_sha256": {str(p): sha256(p) for p in files},
+        "external_sha256": witness["external_sha256"],
+        "argv": sys.argv,
+    }
+    write(out / "report.json", report)
+    note(
+        out,
+        "# v29 early backward recovery\n"
+        "SHOULD: two teacher controls and four candidates, no new VLA or training.\n"
+        "SHOULD: exact pre-action prefix replay and unchanged physics/target at takeover.\n"
+        "SHOULD: retain original task heading; strict existing gate, rejected raw retained.\n"
+        "Four candidates from two known initial conditions are not independent bodies.",
+    )
+    task = SELECTED["backward"]
+    sim = None
+    try:
+        sim = Simulation(args.upstream, args.teacher)
+        for seed in (700, 730):
+            (out / "run.stage").write_text(f"teacher-{seed}")
+            sim.prepare(task, seed)
+            sim.command(task)
+            trace = expert_rollout(sim, 200)
+            trace.save(out / f"teacher-{seed}.npz")
+            quality = locomotion_outcome(task, trace.metrics, 200)
+            report["controls"].append({"seed": seed, "quality": quality})
+            write(out / "report.json", report)
+            assert quality["accepted"], (seed, quality)
+            stem = source / "step-4000" / f"{seed}-backward-original"
+            saved = np.load(stem.with_suffix(".npz"))
+            original = json.loads(stem.with_suffix(".json").read_text())
+            for prefix in (20, 40):
+                identity = f"recovery-{seed}-{prefix}"
+                (out / "run.stage").write_text(identity)
+                sim.prepare(task, seed)
+                prefix_trace = Trace()
+                prefix_trace.mark(sim)
+                recovery = None
+                try:
+                    for tick, target in enumerate(saved["action"][:prefix]):
+                        state, _ = sim.observe()
+                        np.testing.assert_array_equal(state, saved["state"][tick])
+                        np.testing.assert_array_equal(
+                            sim.previous_target(), saved["previous_target"][tick]
+                        )
+                        prefix_trace.step(sim, target)
+                    np.testing.assert_array_equal(
+                        prefix_trace.physics, saved["integration_state"][: prefix + 1]
+                    )
+                    np.testing.assert_array_equal(
+                        prefix_trace.targets, saved["actuator_target"][: prefix + 1]
+                    )
+                    assert prefix_trace.metrics == original[: prefix + 1]
+                    assert sim.metrics()["stable"]
+                    physics, prior = sim.integration_state(), sim.previous_target()
+                    sim.resume_teacher(task)
+                    np.testing.assert_array_equal(physics, sim.integration_state())
+                    np.testing.assert_array_equal(prior, sim.previous_target())
+                    recovery = expert_rollout(sim, 200)
+                    recovery.save(out / f"{identity}.npz")
+                    np.testing.assert_array_equal(recovery.previous_targets[0], prior)
+                    np.testing.assert_array_equal(
+                        recovery.previous_targets[1:], recovery.actions[:-1]
+                    )
+                    quality = locomotion_outcome(task, recovery.metrics, 200)
+                    remaining = original[prefix:]
+                    common = min(len(remaining), len(recovery.metrics)) - 1
+                    row = {
+                        "id": identity,
+                        "seed": seed,
+                        "prefix": prefix,
+                        "ticks": len(recovery.actions),
+                        "quality": quality,
+                        "without_intervention_ticks": len(remaining) - 1,
+                        "common_ticks": common,
+                        "common_horizon": {
+                            "teacher": locomotion_outcome(
+                                task, recovery.metrics[: common + 1], common
+                            ),
+                            "student": locomotion_outcome(task, remaining[: common + 1], common),
+                        },
+                        "source_heading_retained": True,
+                    }
+                    report["candidates"].append(row)
+                    if quality["accepted"]:
+                        report["accepted"].append(
+                            {
+                                "id": identity,
+                                "frames": len(recovery.actions),
+                                "path": str(out / f"{identity}.npz"),
+                                "text": SMALL_TEXTS["backward"][0],
+                            }
+                        )
+                    write(out / "report.json", report)
+                    note(out, f"{identity}: ticks={row['ticks']}, quality={quality!r}")
+                finally:
+                    prefix_trace.save(out / f"{identity}-prefix.npz")
+                    if recovery is not None:
+                        recovery.save(out / f"{identity}.npz")
+        assert len(report["controls"]) == 2 and len(report["candidates"]) == 4
+        assert source_witness() == report["source_files"]
+        assert all(sha256(Path(p)) == digest for p, digest in report["input_sha256"].items())
+        assert all(sha256(Path(p)) == digest for p, digest in report["external_sha256"].items())
+        report["raw_sha256"] = {str(p): sha256(p) for p in sorted(out.glob("*.npz"))}
+        report["stage"] = "complete"
+        write(out / "report.json", report)
+        note(
+            out,
+            f"Complete: {len(report['accepted'])}/4 recovery candidates accepted.\n"
+            "Common-horizon checks below 100 ticks cannot pass the existing duration gate; "
+            "report stability/progress separately. No new dataset or optimizer yet.",
+        )
+        (out / "run.stage").write_text("complete")
+        (out / "run.exit-code").write_text("0")
+    except BaseException:
+        (out / "run.exit-code").write_text("1")
+        raise
+    finally:
+        if sim is not None:
+            sim.close()
+
+
+def prepare_early_recovery_data(args: argparse.Namespace) -> None:
+    """Make a separate native dataset; retain original episodes and six existing phrasings."""
+    recovery = args.diagnosis_root
+    assert recovery is not None
+    report = json.loads((recovery / "report.json").read_text())
+    independent = json.loads((recovery.parent / "independent-final-audit.json").read_text())
+    assert report["stage"] == "complete" and independent["stage"] == "passed"
+    assert len(report["accepted"]) == 4
+    assert all(sha256(Path(p)) == digest for p, digest in report["raw_sha256"].items())
+    src = dataset(args.replay)
+    original = json.loads((args.replay.parent / "data-audit.json").read_text())
+    assert len(original["episodes"]) == 36 and original["frames"] == 7200
+    assert all(sha256(Path(p)) == digest for p, digest in original["dataset_sha256"].items())
+    numeric, offset = [], 0
+    for ep in original["episodes"]:
+        rows = src.hf_dataset.select(range(offset, offset + ep["frames"]))
+        numeric.append(
+            {
+                "observation.state": np.asarray(rows["observation.state"], dtype=np.float32),
+                "action": np.asarray(rows["action"], dtype=np.float32),
+                "texts": [str(src.meta.tasks.iloc[int(i)].name) for i in rows["task_index"]],
+                "family": ep["family"],
+            }
+        )
+        offset += ep["frames"]
+    mapping = []
+    for accepted in report["accepted"]:
+        raw = np.load(accepted["path"])
+        assert len(raw["action"]) == 200
+        np.testing.assert_array_equal(raw["previous_target"][1:], raw["action"][:-1])
+        state = policy_state(raw["state"], raw["previous_target"], include_previous_target=True)
+        for text in SMALL_TEXTS["backward"]:
+            mapping.append({"episode": len(numeric), "raw": accepted["path"], "text": text})
+            numeric.append(
+                {
+                    "observation.state": state,
+                    "action": raw["action"],
+                    "texts": [text] * 200,
+                    "family": "backward",
+                }
+            )
+    dest = recovery.parent / "data-preparation"
+    dest.mkdir(exist_ok=False)
+    assert shutil.disk_usage(dest).free > 3 * 2**30
+    selected = argparse.Namespace(**vars(args))
+    selected.root = dest
+    selected.course = replace(SMALL_COURSE, name="v29-early-recovery")
+    note(
+        dest,
+        "# v29 native training data\n"
+        "SHOULD: old36/7200 exact, new24/4800 = four physical suffixes×six existing texts.\n"
+        "SHOULD: 60episodes12000frames, state51/H10, black images, float64 stats.\n"
+        "Zero checkpoint changes stats only; no optimizer updates. "
+        "Backward exposure grows from1/3 to3/5.",
+    )
+    try:
+        prepare_data(selected, numeric)
+        assert sum(len(e["action"]) for e in numeric) == 12000
+        write(
+            dest / "recovery-mapping.json",
+            {
+                "source": str(recovery),
+                "source_sha256": report["raw_sha256"],
+                "original_episodes": 36,
+                "mapping": mapping,
+                "physical_new_frames": 800,
+                "optimizer_updates": 0,
+                "initial": str(args.initial),
+            },
+        )
+        note(
+            dest,
+            "Complete: native dataset and unchanged-weight zero checkpoint prepared; "
+            "no training launched.",
+        )
+        (dest / "prepare.exit-code").write_text("0")
+    except BaseException:
+        (dest / "prepare.exit-code").write_text("1")
+        raise
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2857,6 +3093,8 @@ def main() -> None:
             "diagnose-text-noise",
             "diagnose-language-fit",
             "diagnose-state-deviation",
+            "collect-early-recovery",
+            "prepare-early-recovery-data",
             "prepare-backward-corrections",
             "finalize-backward-preparation",
             "train-backward-pair",
@@ -2885,6 +3123,8 @@ def main() -> None:
         "diagnose-text-noise": diagnose_text_noise,
         "diagnose-language-fit": diagnose_text_noise,
         "diagnose-state-deviation": diagnose_state_deviation,
+        "collect-early-recovery": collect_early_recovery,
+        "prepare-early-recovery-data": prepare_early_recovery_data,
         "prepare-backward-corrections": prepare_backward_corrections,
         "finalize-backward-preparation": finalize_backward_preparation,
         "train-backward-pair": run_backward_pair,
