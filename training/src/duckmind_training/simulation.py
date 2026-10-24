@@ -12,6 +12,14 @@ import onnxruntime as ort
 from duckmind_training.contract import IMAGE_SIZE, JOINT_NAMES, Task, state_vector, wire_positions
 
 
+class PreparationError(ValueError):
+    """An invalid physical start, with evidence retained before origin reset."""
+
+    def __init__(self, message: str, evidence: dict):
+        super().__init__(message)
+        self.evidence = evidence
+
+
 class Simulation:
     def __init__(self, upstream: Path, teacher: Path):
         spec = importlib.util.spec_from_file_location(
@@ -100,16 +108,39 @@ class Simulation:
         self.yaw_travel = 0.0
         self.previous_yaw = self.origin_yaw
 
-    def prepare(self, task: Task, seed: int) -> None:
+    def prepare(self, task: Task, seed: int) -> dict:
         self.reset(seed)
+        preparation = {"initial_twist": list(task.initial_twist), "metrics": []}
         if any(task.initial_twist):
             self.expert.set_vel_cmd(*task.initial_twist)
+            preparation["metrics"].append(self.metrics())
             for _ in range(100):
                 self.teacher_step()
+                preparation["metrics"].append(self.metrics())
+            # Preserve moving-start evidence before mark_origin clears the speed window.
+            tail = preparation["metrics"][-51:]
+            signed_progress = (tail[-1]["forward_m"] - tail[0]["forward_m"]) * np.sign(
+                task.initial_twist[0]
+            )
+            preparation["signed_tail_progress_m"] = float(signed_progress)
+            if task.initial_twist[0] and (
+                signed_progress <= 0.03 or not all(m["stable"] for m in tail)
+            ):
+                raise PreparationError(
+                    f"moving start failed: task={task.name} seed={seed} "
+                    f"signed_progress={signed_progress:.6f}m "
+                    f"stable_tail={all(m['stable'] for m in tail)}",
+                    preparation,
+                )
             # Stop examples start from an actually moving body, never a stationary reset.
             if not self.metrics()["stable"] or np.mean(self.tail_speeds) < 0.06:
-                raise ValueError(f"expert cannot prepare moving start for {task.name}")
+                raise PreparationError(
+                    f"moving start too slow or unstable: task={task.name} seed={seed} "
+                    f"speed={np.mean(self.tail_speeds):.6f}m/s",
+                    preparation,
+                )
         self.mark_origin()
+        return preparation
 
     def command(self, task: Task) -> None:
         self.expert.head_offset[:] = task.head
